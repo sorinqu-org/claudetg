@@ -5,6 +5,7 @@ import {
   buildEfficiencyEnvironment,
   buildEfficiencyPlugins,
   enabledFromEnv,
+  resolveEffortLevel,
 } from "../agent/efficiency.js";
 
 function withEnv(name: string, value: string | undefined, callback: () => void): void {
@@ -23,14 +24,29 @@ test("enabledFromEnv supports common boolean values", () => {
   withEnv("EFFICIENCY_TEST_FLAG", undefined, () => assert.equal(enabledFromEnv("EFFICIENCY_TEST_FLAG", true), true));
 });
 
-test("bundled tool directory is prepended to PATH", () => {
-  const environment = buildEfficiencyEnvironment("/usr/bin");
-  const pathValue = environment.PATH;
-  assert.ok(pathValue);
-  const entries = pathValue.split(path.delimiter);
-  assert.match(entries[0] ?? "", /node_modules[/\\]\.bin$/);
-  assert.equal(entries.at(-1), "/usr/bin");
-  assert.equal(environment.MCP_TIMEOUT, "60000");
+test("effort defaults to medium and validates configured values", () => {
+  assert.equal(resolveEffortLevel(undefined), "medium");
+  assert.equal(resolveEffortLevel(" XHIGH "), "xhigh");
+  assert.throws(() => resolveEffortLevel("turbo"), /CLAUDE_CODE_EFFORT_LEVEL/);
+});
+
+test("bundled tools and output-saving environment are passed to Claude Code", () => {
+  withEnv("CLAUDE_CODE_EFFORT_LEVEL", undefined, () => {
+    withEnv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", undefined, () => {
+      withEnv("CLAUDE_CODE_DISABLE_THINKING", "true", () => {
+        const environment = buildEfficiencyEnvironment("/usr/bin");
+        const pathValue = environment.PATH;
+        assert.ok(pathValue);
+        const entries = pathValue.split(path.delimiter);
+        assert.match(entries[0] ?? "", /node_modules[/\\]\.bin$/);
+        assert.equal(entries.at(-1), "/usr/bin");
+        assert.equal(environment.MCP_TIMEOUT, "60000");
+        assert.equal(environment.CLAUDE_CODE_EFFORT_LEVEL, "medium");
+        assert.equal(environment.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION, "false");
+        assert.equal(environment.CLAUDE_CODE_DISABLE_THINKING, "1");
+      });
+    });
+  });
 });
 
 test("base efficiency plugin is enabled and Serena is opt-in", () => {
