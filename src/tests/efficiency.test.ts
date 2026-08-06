@@ -25,7 +25,9 @@ test("enabledFromEnv supports common boolean values", () => {
 
 test("bundled tool directory is prepended to PATH", () => {
   const environment = buildEfficiencyEnvironment("/usr/bin");
-  const entries = environment.PATH.split(path.delimiter);
+  const pathValue = environment.PATH;
+  assert.ok(pathValue);
+  const entries = pathValue.split(path.delimiter);
   assert.match(entries[0] ?? "", /node_modules[/\\]\.bin$/);
   assert.equal(entries.at(-1), "/usr/bin");
   assert.equal(environment.MCP_TIMEOUT, "60000");
