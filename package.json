@@ -1,0 +1,25 @@
+{
+  "name": "claudetg",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Production Telegram interface for Claude Agent SDK and Claude Code workflows",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test dist/tests/*.test.js",
+    "start": "node --enable-source-maps dist/index.js",
+    "dev": "npm run build && node --watch --enable-source-maps dist/index.js"
+  },
+  "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.220",
+    "grammy": "1.45.1"
+  },
+  "devDependencies": {
+    "@types/node": "22.15.30",
+    "typescript": "5.8.3"
+  }
+}

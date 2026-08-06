@@ -1,0 +1,51 @@
+{
+  "defaultProjectId": "main",
+  "providers": [
+    {
+      "id": "custom",
+      "name": "Custom Anthropic-compatible provider",
+      "baseUrl": "https://provider.example.com",
+      "auth": {
+        "type": "bearer",
+        "env": "CUSTOM_PROVIDER_API_KEY"
+      },
+      "models": [
+        {
+          "id": "claude-opus-4-8",
+          "name": "Claude Opus 4.8",
+          "description": "Opus 4.8 through the custom provider"
+        }
+      ]
+    }
+  ],
+  "projects": [
+    {
+      "id": "main",
+      "name": "Main project",
+      "path": "/workspace/main",
+      "providerId": "custom",
+      "modelId": "claude-opus-4-8",
+      "permissionMode": "default",
+      "allowedTools": ["Read", "Glob", "Grep"],
+      "disallowedTools": [
+        "Bash(sudo *)",
+        "Bash(* /var/run/docker.sock*)"
+      ],
+      "additionalDirectories": [],
+      "settingSources": ["project", "local"],
+      "passEnv": ["CI"],
+      "autoAllowReadTools": true,
+      "systemPromptAppend": "Work only inside the configured project directories. Never reveal secrets or credentials. Ask before destructive or externally visible actions."
+    }
+  ],
+  "agent": {
+    "maxTurns": 80,
+    "maxBudgetUsd": 25,
+    "turnTimeoutMs": 3600000,
+    "approvalTimeoutMs": 86400000,
+    "streamFlushMs": 900,
+    "maxToolDetailChars": 3000,
+    "queueLimit": 20,
+    "eventRetentionPerSession": 5000
+  }
+}
