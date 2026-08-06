@@ -9,10 +9,12 @@ import {
 import { getProject, getProvider, assertProviderModel } from "../config.js";
 import type { Database } from "../db.js";
 import type { RuntimeConfig, SessionRecord } from "../domain.js";
+import type { EffortStore } from "../effort-store.js";
 import type { Logger } from "../logger.js";
 import { errorFields } from "../logger.js";
 import { collectPathViolations, redactText } from "../security.js";
 import { escapeHtml, truncate } from "../telegram/format.js";
+import { buildEfficiencyEnvironment, buildEfficiencyPlugins, resolveEffortLevel, type EffortSetting } from "./efficiency.js";
 import { InteractionBroker } from "./interaction-broker.js";
 import { AgentMessageRenderer } from "./message-renderer.js";
 
@@ -45,6 +47,7 @@ const SAFE_ENV_NAMES = [
 function buildAgentEnv(
   config: RuntimeConfig,
   session: SessionRecord,
+  effort: EffortSetting,
 ): { env: Record<string, string | undefined>; secrets: string[] } {
   const project = getProject(config, session.projectId);
   const provider = getProvider(config, session.providerId);
@@ -55,6 +58,7 @@ function buildAgentEnv(
   for (const name of SAFE_ENV_NAMES) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
+  Object.assign(env, buildEfficiencyEnvironment(env.PATH, effort));
   for (const name of project.passEnv ?? []) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
@@ -162,6 +166,7 @@ export class AgentRunner {
     private readonly config: RuntimeConfig,
     private readonly database: Database,
     private readonly broker: InteractionBroker,
+    private readonly effortStore: EffortStore,
     private readonly logger: Logger,
   ) {}
 
@@ -233,7 +238,8 @@ export class AgentRunner {
     const project = getProject(this.config, session.projectId);
     const provider = getProvider(this.config, session.providerId);
     assertProviderModel(provider, session.modelId);
-    const { env, secrets } = buildAgentEnv(this.config, session);
+    const effort = this.effortStore.get(session.id) ?? resolveEffortLevel();
+    const { env, secrets } = buildAgentEnv(this.config, session, effort);
     const abortController = new AbortController();
     this.active.set(chatId, { sessionId: session.id, abortController, startedAt: Date.now() });
     this.database.updateSession(session.id, { status: "running", lastError: null });
@@ -243,7 +249,8 @@ export class AgentRunner {
       `▶️ <b>${escapeHtml(session.title)}</b>\n` +
         `Project: <code>${escapeHtml(project.name)}</code>\n` +
         `Model: <code>${escapeHtml(session.modelId)}</code>\n` +
-        `Mode: <code>${escapeHtml(session.permissionMode)}</code>`,
+        `Mode: <code>${escapeHtml(session.permissionMode)}</code>\n` +
+        `Effort: <code>${escapeHtml(effort)}</code>`,
       { parse_mode: "HTML" },
     );
     const renderer = new AgentMessageRenderer(
@@ -293,10 +300,11 @@ export class AgentRunner {
         includePartialMessages: true,
         includeHookEvents: true,
         forwardSubagentText: true,
-        agentProgressSummaries: true,
-        promptSuggestions: true,
+        agentProgressSummaries: false,
+        promptSuggestions: false,
         maxTurns: this.config.agent.maxTurns,
         tools: { type: "preset", preset: "claude_code" },
+        plugins: buildEfficiencyPlugins(),
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
