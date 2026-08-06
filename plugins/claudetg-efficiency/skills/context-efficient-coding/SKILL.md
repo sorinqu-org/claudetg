@@ -25,6 +25,15 @@ When Serena tools are available, prefer symbol overview, symbol lookup and refer
 - Inspect the focused diff after editing. Run the narrowest relevant tests first, then broader checks when warranted.
 - Do not paste binary data, minified bundles or complete dependency trees into context.
 
+## User-visible output
+
+- Do not narrate routine tool use, repeat the user's request or announce an obvious plan. Use tools directly.
+- Between tool calls, write only when a blocking issue or user decision requires attention.
+- Put the result first in the final answer. Then report changed files, checks performed and unresolved risks.
+- Prefer a few short paragraphs or at most eight compact bullets. Do not reproduce full diffs, unchanged code, long logs or complete command output unless the user asks for them.
+- Keep confirmation questions focused and singular. Avoid speculative follow-up suggestions unrelated to the task.
+- Do not add comments, docstrings or documentation merely to explain obvious code; add them only when they improve maintainability.
+
 ## Repomix
 
 Repomix is for an architecture map or a bounded handoff, not for automatically packing the whole repository into every prompt.
@@ -35,4 +44,4 @@ Compression is a lossy overview. Before changing code, inspect the original sour
 
 ## Quality rule
 
-Do not trade correctness for a smaller context. Expand the search when evidence is incomplete, behavior crosses subsystem boundaries, or a focused test contradicts the current hypothesis.
+Do not trade correctness for a smaller context or shorter answer. Expand the search or explanation when evidence is incomplete, behavior crosses subsystem boundaries, a focused test contradicts the current hypothesis, or the user needs operational instructions.
