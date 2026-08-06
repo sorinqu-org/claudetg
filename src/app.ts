@@ -137,7 +137,15 @@ export class ClaudeTelegramApp {
 
   private async settings(ctx: Context): Promise<void> { const s = this.database.getActiveSession(ctx.chat!.id); if (!s) return void await ctx.reply("Нет сессии."); const p = getProject(this.config, s.projectId); const provider = getProvider(this.config, s.providerId); const secret = process.env[provider.auth.env]?.trim(); await ctx.reply([`<b>Config</b>: <code>${escapeHtml(this.config.configPath)}</code>`, `<b>Project</b>: <code>${escapeHtml(p.path)}</code>`, `<b>Base URL</b>: <code>${escapeHtml(provider.baseUrl)}</code>`, `<b>Auth</b>: ${provider.auth.type} via <code>${escapeHtml(provider.auth.env)}</code>`, `<b>Model</b>: <code>${escapeHtml(s.modelId)}</code>`].join("\n"), { parse_mode: "HTML" }); const files = inspectProjectSettings(p.path, secret ? [secret] : []); if (!files.length) return void await ctx.reply("Claude settings не найдены."); for (const f of files) await this.long(ctx, `<b>${escapeHtml(f.path)}</b>\n${expandableBlockquote(f.content)}`); }
 
-  private async history(ctx: Context): Promise<void> { const s = this.database.getActiveSession(ctx.chat!.id); if (!s) return void await ctx.reply("Нет сессии."); const n = Number.parseInt(ctx.match.trim(), 10); const events = this.database.listEvents(s.id, Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 30).reverse(); if (!events.length) return void await ctx.reply("История пуста."); await this.long(ctx, events.map((e) => `<code>${e.createdAt.slice(11,19)}</code> <b>${escapeHtml(e.kind)}</b> — ${escapeHtml(truncate(e.summary,700))}`).join("\n")); }
+  private async history(ctx: Context): Promise<void> {
+    const s = this.database.getActiveSession(ctx.chat!.id);
+    if (!s) return void await ctx.reply("Нет сессии.");
+    const rawMatch = typeof ctx.match === "string" ? ctx.match : "";
+    const n = Number.parseInt(rawMatch.trim(), 10);
+    const events = this.database.listEvents(s.id, Number.isFinite(n) ? Math.min(Math.max(n, 1), 100) : 30).reverse();
+    if (!events.length) return void await ctx.reply("История пуста.");
+    await this.long(ctx, events.map((e) => `<code>${e.createdAt.slice(11,19)}</code> <b>${escapeHtml(e.kind)}</b> — ${escapeHtml(truncate(e.summary,700))}`).join("\n"));
+  }
 
   private async configurationCallback(ctx: Context): Promise<void> {
     const data = ctx.callbackQuery?.data; const chatId = ctx.chat?.id; if (!data || !chatId) return;
