@@ -9,10 +9,11 @@ RUN npm run build && npm prune --omit=dev
 FROM node:22-bookworm-slim AS runtime
 
 RUN apt-get update \
-  && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client ripgrep python3 python3-venv \
-  && python3 -m venv /opt/serena \
-  && /opt/serena/bin/pip install --no-cache-dir serena-agent==1.6.1 \
-  && ln -s /opt/serena/bin/serena /usr/local/bin/serena \
+  && apt-get install -y --no-install-recommends bash ca-certificates git openssh-client ripgrep jq universal-ctags python3 python3-venv \
+  && python3 -m venv /opt/agent-tools \
+  && /opt/agent-tools/bin/pip install --no-cache-dir serena-agent==1.6.1 semble==0.3.0 \
+  && ln -s /opt/agent-tools/bin/serena /usr/local/bin/serena \
+  && ln -s /opt/agent-tools/bin/semble /usr/local/bin/semble \
   && rm -rf /var/lib/apt/lists/* \
   && groupadd --gid 10001 claudetg \
   && useradd --uid 10001 --gid claudetg --create-home --home-dir /app/data/home --shell /bin/bash claudetg
@@ -32,7 +33,7 @@ ENV NODE_ENV=production \
     CONFIG_PATH=/app/config/config.json \
     HOME=/app/data/home \
     HEALTH_PORT=3000 \
-    PATH=/app/node_modules/.bin:/opt/serena/bin:${PATH}
+    PATH=/app/node_modules/.bin:/opt/agent-tools/bin:${PATH}
 
 USER claudetg
 EXPOSE 3000

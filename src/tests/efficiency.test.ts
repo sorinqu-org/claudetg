@@ -5,6 +5,7 @@ import {
   buildEfficiencyEnvironment,
   buildEfficiencyPlugins,
   enabledFromEnv,
+  isEffortSetting,
   resolveEffortLevel,
 } from "../agent/efficiency.js";
 
@@ -24,41 +25,41 @@ test("enabledFromEnv supports common boolean values", () => {
   withEnv("EFFICIENCY_TEST_FLAG", undefined, () => assert.equal(enabledFromEnv("EFFICIENCY_TEST_FLAG", true), true));
 });
 
-test("effort defaults to medium and validates configured values", () => {
-  assert.equal(resolveEffortLevel(undefined), "medium");
-  assert.equal(resolveEffortLevel(" XHIGH "), "xhigh");
-  assert.throws(() => resolveEffortLevel("turbo"), /CLAUDE_CODE_EFFORT_LEVEL/);
+test("effort validation supports auto and all explicit levels", () => {
+  for (const value of ["auto", "low", "medium", "high", "xhigh", "max"]) {
+    assert.equal(isEffortSetting(value), true);
+    assert.equal(resolveEffortLevel(value), value);
+  }
+  assert.throws(() => resolveEffortLevel("unlimited"), /must be one of/);
 });
 
-test("bundled tools and output-saving environment are passed to Claude Code", () => {
-  withEnv("CLAUDE_CODE_EFFORT_LEVEL", undefined, () => {
-    withEnv("CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION", undefined, () => {
-      withEnv("CLAUDE_CODE_DISABLE_THINKING", "true", () => {
-        const environment = buildEfficiencyEnvironment("/usr/bin");
-        const pathValue = environment.PATH;
-        assert.ok(pathValue);
-        const entries = pathValue.split(path.delimiter);
-        assert.match(entries[0] ?? "", /node_modules[/\\]\.bin$/);
-        assert.equal(entries.at(-1), "/usr/bin");
-        assert.equal(environment.MCP_TIMEOUT, "60000");
-        assert.equal(environment.CLAUDE_CODE_EFFORT_LEVEL, "medium");
-        assert.equal(environment.CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION, "false");
-        assert.equal(environment.CLAUDE_CODE_DISABLE_THINKING, "1");
+test("bundled tool directory and selected effort are applied to the agent environment", () => {
+  const environment = buildEfficiencyEnvironment("/usr/bin", "low");
+  const pathValue = environment.PATH;
+  assert.ok(pathValue);
+  const entries = pathValue.split(path.delimiter);
+  assert.match(entries[0] ?? "", /node_modules[/\\]\.bin$/);
+  assert.equal(entries.at(-1), "/usr/bin");
+  assert.equal(environment.MCP_TIMEOUT, "60000");
+  assert.equal(environment.CLAUDE_CODE_EFFORT_LEVEL, "low");
+});
+
+test("local efficiency and Semble plugins are enabled while external services are opt-in", () => {
+  withEnv("TOKEN_EFFICIENCY_ENABLED", undefined, () => {
+    withEnv("SEMBLE_ENABLED", undefined, () => {
+      withEnv("CONTEXT7_ENABLED", undefined, () => {
+        withEnv("SERENA_ENABLED", undefined, () => {
+          const names = buildEfficiencyPlugins().map((plugin) => path.basename(plugin.path));
+          assert.deepEqual(names, ["claudetg-efficiency", "claudetg-semble"]);
+        });
       });
     });
   });
-});
 
-test("base efficiency plugin is enabled and Serena is opt-in", () => {
-  withEnv("TOKEN_EFFICIENCY_ENABLED", undefined, () => {
-    withEnv("SERENA_ENABLED", undefined, () => {
+  withEnv("CONTEXT7_ENABLED", "true", () => {
+    withEnv("SERENA_ENABLED", "true", () => {
       const names = buildEfficiencyPlugins().map((plugin) => path.basename(plugin.path));
-      assert.deepEqual(names, ["claudetg-efficiency"]);
+      assert.deepEqual(names, ["claudetg-efficiency", "claudetg-semble", "claudetg-context7", "claudetg-serena"]);
     });
-  });
-
-  withEnv("SERENA_ENABLED", "true", () => {
-    const names = buildEfficiencyPlugins().map((plugin) => path.basename(plugin.path));
-    assert.deepEqual(names, ["claudetg-efficiency", "claudetg-serena"]);
   });
 });
