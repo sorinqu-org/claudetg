@@ -13,6 +13,7 @@ import type { Logger } from "../logger.js";
 import { errorFields } from "../logger.js";
 import { collectPathViolations, redactText } from "../security.js";
 import { escapeHtml, truncate } from "../telegram/format.js";
+import { buildEfficiencyEnvironment, buildEfficiencyPlugins } from "./efficiency.js";
 import { InteractionBroker } from "./interaction-broker.js";
 import { AgentMessageRenderer } from "./message-renderer.js";
 
@@ -55,6 +56,7 @@ function buildAgentEnv(
   for (const name of SAFE_ENV_NAMES) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
+  Object.assign(env, buildEfficiencyEnvironment(env.PATH));
   for (const name of project.passEnv ?? []) {
     if (process.env[name] !== undefined) env[name] = process.env[name];
   }
@@ -297,6 +299,7 @@ export class AgentRunner {
         promptSuggestions: true,
         maxTurns: this.config.agent.maxTurns,
         tools: { type: "preset", preset: "claude_code" },
+        plugins: buildEfficiencyPlugins(),
         systemPrompt: {
           type: "preset",
           preset: "claude_code",
