@@ -28,7 +28,9 @@ jobs:
         env:
           CLAUDETG_INTERNAL_TOKEN: ci-internal-token
           CLAUDETG_PROJECT_PATH: /tmp/claudetg-ci-project
-        run: docker compose config --quiet
+        run: |
+          cp .env.example .env
+          docker compose config --quiet
 
   docker-controller:
     runs-on: ubuntu-latest
