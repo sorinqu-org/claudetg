@@ -52,6 +52,9 @@ function buildAgentEnv(
   const project = getProject(config, session.projectId);
   const provider = getProvider(config, session.providerId);
   assertProviderModel(provider, session.modelId);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(provider.auth.env)) {
+    throw new Error("Provider auth.env must contain an environment variable name (for example AGENTROUTER_API_KEY), not the API key itself.");
+  }
   const secret = process.env[provider.auth.env]?.trim();
   if (!secret) throw new Error(`Provider credential environment variable is missing: ${provider.auth.env}`);
   const env: Record<string, string | undefined> = {};
@@ -211,8 +214,19 @@ export class AgentRunner {
   }
 
   private startExecution(chatId: number, userId: number, text: string): void {
-    const promise = this.execute(chatId, userId, text).catch((error: unknown) => {
-      this.logger.error("Uncaught agent turn failure", { chatId, ...errorFields(error) });
+    const promise = this.execute(chatId, userId, text).catch(async (error: unknown) => {
+      const message = redactText(error instanceof Error ? error.message : String(error));
+      const session = this.database.getActiveSession(chatId);
+      if (session) {
+        this.database.updateSession(session.id, { status: "error", lastError: truncate(message, 2000) });
+        this.database.addEvent(session.id, "startup_error", truncate(message, 1000));
+      }
+      this.logger.error("Uncaught agent turn failure", { chatId, error: message });
+      await this.api.sendMessage(
+        chatId,
+        `❌ <b>Не удалось запустить Claude</b>\n${escapeHtml(message)}`,
+        { parse_mode: "HTML" },
+      ).catch((sendError: unknown) => this.logger.debug("Could not send startup error to Telegram", { error: String(sendError) }));
     });
     this.runPromises.set(chatId, promise);
     void promise.finally(() => {
