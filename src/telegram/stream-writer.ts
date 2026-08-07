@@ -2,6 +2,10 @@ import type { Api, RawApi } from "grammy";
 import { escapeHtml, SAFE_MESSAGE_LIMIT } from "./format.js";
 import type { Logger } from "../logger.js";
 
+function richMarkdown(text: string): { markdown: string } {
+  return { markdown: `**Claude**\n\n${text || "…"}` };
+}
+
 export class TelegramStreamWriter {
   private currentMessageId: number | undefined;
   private currentChunk = "";
@@ -59,18 +63,35 @@ export class TelegramStreamWriter {
   }
 
   private async upsert(text: string): Promise<void> {
-    const html = `<b>Claude</b>\n${escapeHtml(text || "…")}`;
+    const rich = richMarkdown(text);
+    const fallbackHtml = `<b>Claude</b>\n${escapeHtml(text || "…")}`;
+
     if (!this.currentMessageId) {
-      const message = await this.api.sendMessage(this.chatId, html, { parse_mode: "HTML" });
-      this.currentMessageId = message.message_id;
-      return;
+      try {
+        const message = await this.api.sendRichMessage(this.chatId, rich);
+        this.currentMessageId = message.message_id;
+        return;
+      } catch (error) {
+        this.logger.debug("Rich Markdown send failed; falling back to regular message", { error: String(error) });
+        const message = await this.api.sendMessage(this.chatId, fallbackHtml, { parse_mode: "HTML" });
+        this.currentMessageId = message.message_id;
+        return;
+      }
     }
+
     try {
-      await this.api.editMessageText(this.chatId, this.currentMessageId, html, { parse_mode: "HTML" });
+      await this.api.editMessageText(this.chatId, this.currentMessageId, rich);
     } catch (error) {
       const message = String(error);
       if (message.includes("message is not modified")) return;
-      throw error;
+      this.logger.debug("Rich Markdown edit failed; falling back to escaped HTML", { error: message });
+      try {
+        await this.api.editMessageText(this.chatId, this.currentMessageId, fallbackHtml, { parse_mode: "HTML" });
+      } catch (fallbackError) {
+        const fallbackMessage = String(fallbackError);
+        if (fallbackMessage.includes("message is not modified")) return;
+        throw fallbackError;
+      }
     }
   }
 }
