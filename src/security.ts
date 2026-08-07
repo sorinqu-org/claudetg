@@ -23,7 +23,7 @@ export function redactText(text: string, secrets: string[] = []): string {
     output = output.split(secret).join("[redacted]");
   }
   output = output
-    .replace(/\b(sk-ant-[A-Za-z0-9_-]{12,})\b/g, "[redacted]")
+    .replace(/\b(sk-[A-Za-z0-9_-]{16,})\b/g, "[redacted]")
     .replace(/\b(Bearer\s+)[A-Za-z0-9._~+\/-]{12,}/gi, "$1[redacted]")
     .replace(/(["']?(?:api[_-]?key|token|secret|password)["']?\s*[:=]\s*["'])[^"'\s]{6,}/gi, "$1[redacted]");
   return output;

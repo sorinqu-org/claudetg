@@ -1,37 +1,36 @@
 # ClaudeTG
 
-ClaudeTG запускает Claude Agent SDK на вашем сервере, а Telegram использует как интерфейс. Можно писать задачи с телефона, следить за ответом, подтверждать команды и продолжать старые сессии без подключения к терминалу.
+ClaudeTG запускает Claude Agent SDK на вашем сервере и использует Telegram как интерфейс. Можно отправлять задачи с телефона, получать потоковый ответ, видеть tool use, подтверждать действия, отвечать на `AskUserQuestion`, переключать модели и продолжать сохранённые Claude-сессии.
 
-Проект рассчитан на самостоятельное развёртывание. Он работает с Anthropic-совместимыми API-шлюзами, поэтому endpoint, ключ и название модели задаются в конфигурации. В примере используется `claude-opus-4-8`.
+Проект рассчитан на self-hosted установку и работает с Anthropic-compatible API providers. В примерах ниже используется `claude-opus-4-8`.
 
-## Что умеет бот
+## Возможности
 
-- передаёт ответы Claude в Telegram по мере генерации;
-- показывает вызовы инструментов в компактном виде и обновляет карточку после выполнения;
-- спрашивает разрешение перед действиями, которые не были разрешены заранее;
-- поддерживает `AskUserQuestion`, включая выбор нескольких вариантов и свободный ответ;
-- хранит сессии в SQLite и продолжает их через Agent SDK;
-- работает с несколькими проектами, провайдерами и моделями;
-- позволяет менять модель и permission mode из Telegram;
-- показывает текущие задачи, историю, настройки, tools, MCP-серверы и skills;
-- ставит новые сообщения в очередь, пока Claude занят;
-- умеет остановить текущий turn;
-- запускается через Docker Compose или как обычное Node.js-приложение.
+- streaming ответов Claude в Telegram;
+- компактные карточки tool use и tool result;
+- интерактивные approvals;
+- поддержка `AskUserQuestion`;
+- сохранение и resume сессий через SQLite;
+- несколько проектов, провайдеров и моделей;
+- выбор permission mode и effort из Telegram;
+- очередь запросов;
+- просмотр workflow, tools, skills, MCP и истории;
+- token-efficient поиск через `rg`, `ast-grep`, Semble, Repomix и Universal Ctags;
+- опциональные Serena MCP и Context7;
+- Docker Compose и обычный Node.js запуск.
 
-Claude Code отдельно устанавливать не нужно: нужный runtime поставляется вместе с Claude Agent SDK.
+Claude Code отдельно устанавливать не требуется: нужный runtime поставляется вместе с Claude Agent SDK.
 
-## Что потребуется
+## Требования
 
-- Telegram-бот, созданный через BotFather;
-- числовой Telegram user ID пользователя, которому разрешён доступ;
-- API-ключ провайдера;
-- Anthropic-совместимый endpoint с `/v1/messages`, streaming и tool use;
-- каталог с проектом на сервере;
-- Docker Compose или Node.js 22.13+.
+- Telegram bot token от BotFather;
+- числовой Telegram user ID;
+- API-ключ Anthropic-compatible провайдера;
+- endpoint с Messages API, streaming и tool use;
+- Docker Compose либо Node.js 22.13+;
+- каталог проекта на сервере.
 
 ## Быстрый запуск через Docker Compose
-
-Клонируйте репозиторий и создайте локальные файлы конфигурации:
 
 ```bash
 git clone https://github.com/sorinqu-org/claudetg.git
@@ -42,7 +41,9 @@ cp config/config.example.json config/config.json
 mkdir -p data
 ```
 
-### 1. Заполните `.env`
+### 1. `.env`
+
+Минимальный пример:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456789:telegram-bot-token
@@ -56,17 +57,26 @@ ALLOW_GROUP_CHATS=false
 LOG_LEVEL=info
 
 TOKEN_EFFICIENCY_ENABLED=true
+SEMBLE_ENABLED=true
 SERENA_ENABLED=false
+CONTEXT7_ENABLED=false
 MCP_TIMEOUT=60000
+
+CLAUDE_CODE_EFFORT_LEVEL=medium
+CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
+CLAUDE_CODE_DISABLE_THINKING=false
+
+# Только если используете Context7 и хотите передавать ключ агенту.
+CONTEXT7_API_KEY=
 ```
 
-В `TELEGRAM_ALLOWED_USER_IDS` указываются числовые ID, а не usernames. Несколько ID можно перечислить через запятую.
+`TELEGRAM_ALLOWED_USER_IDS` содержит числовые ID, а не usernames. Несколько ID указываются через запятую.
 
-Не добавляйте настоящий `.env` в Git.
+Не коммитьте настоящий `.env`.
 
-### 2. Настройте провайдера и проект
+### 2. Провайдер и проект
 
-Откройте `config/config.json`:
+`config/config.json`:
 
 ```json
 {
@@ -74,7 +84,7 @@ MCP_TIMEOUT=60000
   "providers": [
     {
       "id": "custom",
-      "name": "Мой провайдер",
+      "name": "Custom provider",
       "baseUrl": "https://provider.example.com",
       "auth": {
         "type": "bearer",
@@ -91,7 +101,7 @@ MCP_TIMEOUT=60000
   "projects": [
     {
       "id": "main",
-      "name": "Основной проект",
+      "name": "Main project",
       "path": "/workspace/main",
       "providerId": "custom",
       "modelId": "claude-opus-4-8",
@@ -121,21 +131,69 @@ MCP_TIMEOUT=60000
 }
 ```
 
-`baseUrl` должен указывать на корень Anthropic-совместимого API. Для Bearer-токена оставьте:
+### Важно: `auth.env` — это имя переменной, а не API-ключ
+
+Правильно:
 
 ```json
-"auth": { "type": "bearer", "env": "CUSTOM_PROVIDER_API_KEY" }
+"auth": {
+  "type": "bearer",
+  "env": "CUSTOM_PROVIDER_API_KEY"
+}
 ```
 
-Если сервис ожидает заголовок `X-Api-Key`, используйте:
+и в `.env`:
+
+```dotenv
+CUSTOM_PROVIDER_API_KEY=sk-your-real-key
+```
+
+Неправильно:
 
 ```json
-"auth": { "type": "api-key", "env": "CUSTOM_PROVIDER_API_KEY" }
+"auth": {
+  "type": "bearer",
+  "env": "sk-your-real-key"
+}
 ```
 
-Название переменной из поля `env` должно совпадать с переменной в `.env`.
+Поле `env` говорит ClaudeTG, из какой переменной окружения взять секрет. Сам ключ в `config.json` хранить не нужно.
 
-### 3. Подключите каталог с проектами
+Для Bearer authentication используется `auth.type = "bearer"`. Если провайдер ожидает `X-Api-Key`, используйте `auth.type = "api-key"`.
+
+### AgentRouter
+
+Для AgentRouter конфигурация выглядит так:
+
+`.env`:
+
+```dotenv
+AGENTROUTER_API_KEY=your-agentrouter-key
+```
+
+`config/config.json`:
+
+```json
+{
+  "id": "agentrouter",
+  "name": "AgentRouter",
+  "baseUrl": "https://co.agentrouter.org",
+  "auth": {
+    "type": "bearer",
+    "env": "AGENTROUTER_API_KEY"
+  },
+  "models": [
+    {
+      "id": "claude-opus-4-8",
+      "name": "Claude Opus 4.8"
+    }
+  ]
+}
+```
+
+Для Anthropic/Claude Code совместимого маршрута используется `https://co.agentrouter.org`, без `/v1`.
+
+### 3. Каталог проекта
 
 По умолчанию `docker-compose.yml` монтирует:
 
@@ -143,18 +201,16 @@ MCP_TIMEOUT=60000
 - /srv/projects:/workspace:rw
 ```
 
-Значит каталог `/srv/projects/main` на хосте будет доступен внутри контейнера как `/workspace/main` — именно этот путь указан в примере конфигурации.
-
-Создайте каталог и дайте контейнеру права на запись:
+Значит `/srv/projects/main` на хосте соответствует `/workspace/main` внутри контейнера.
 
 ```bash
 sudo mkdir -p /srv/projects/main
 sudo chown -R 10001:10001 /srv/projects/main data
 ```
 
-Можно заменить mount на свой, но путь внутри контейнера должен совпадать с `projects[].path`.
+Если меняете mount, обновите и `projects[].path`.
 
-### 4. Запустите бот
+### 4. Запуск
 
 ```bash
 docker compose up -d --build
@@ -166,128 +222,191 @@ docker compose up -d --build
 docker compose logs -f claudetg
 ```
 
-Проверка состояния:
+Healthcheck:
 
 ```bash
 curl http://127.0.0.1:3000/healthz
 ```
 
-После запуска откройте бота в Telegram и отправьте `/start`.
+После запуска отправьте боту `/start`.
 
-## Команды Telegram
+## Telegram-команды
 
-| Команда | Что делает |
+| Команда | Назначение |
 | --- | --- |
-| `/new [название]` | создаёт новую сессию |
-| `/sessions` | показывает сессии и позволяет переключиться |
-| `/project` | выбирает проект и создаёт новую сессию |
-| `/provider` | выбирает провайдера |
-| `/model` | выбирает модель |
-| `/mode` | меняет permission mode |
-| `/status` | показывает статус, очередь, расходы и SDK session ID |
-| `/workflow` | показывает текущие задачи Claude |
-| `/tools` | показывает tools, MCP, skills и правила разрешений |
-| `/settings` | показывает настройки приложения и проекта |
-| `/history [N]` | показывает последние события сессии |
-| `/stop` | останавливает активный turn и очищает очередь |
-| `/cancel` | отменяет ожидающее подтверждение или вопрос |
-| `/clearapprovals` | сбрасывает разрешения, выданные до конца сессии |
-| `/rename название` | переименовывает активную сессию |
-| `/close` | архивирует активную сессию |
+| `/new [название]` | новая сессия |
+| `/sessions` | список и переключение сессий |
+| `/project` | выбрать проект |
+| `/provider` | выбрать provider |
+| `/model` | выбрать модель |
+| `/mode` | permission mode |
+| `/effort` | effort для текущей сессии |
+| `/status` | состояние, очередь, cost, SDK session ID и effort |
+| `/workflow` | workflow/task состояние |
+| `/tools` | tools, MCP, skills и permissions |
+| `/settings` | конфигурация приложения и проекта |
+| `/history [N]` | последние события |
+| `/stop` | остановить turn и очистить очередь |
+| `/cancel` | отменить ожидающий approval/question |
+| `/clearapprovals` | очистить session approvals |
+| `/rename название` | переименовать сессию |
+| `/close` | архивировать сессию |
 
-Обычное текстовое сообщение отправляется Claude как новый запрос. Если turn уже выполняется, сообщение попадёт в очередь. Когда Claude ожидает ответ на `AskUserQuestion`, обычный текст считается ответом на этот вопрос.
+Обычный текст запускает новый turn. Если Claude уже работает, сообщение попадает в очередь.
 
-## Инструменты для экономного контекста
+## Effort и output tokens
 
-В образ уже входят `ripgrep`, `ast-grep` и Repomix. Вместе с ними загружается небольшой Agent SDK plugin, который учит Claude сначала находить нужные символы и участки кода, а уже потом читать файлы. Skills подгружаются по необходимости, поэтому их полные инструкции не занимают контекст каждого запроса.
+`/effort` меняет уровень только для активной Telegram-сессии. Выбор сохраняется в SQLite и применяется со следующего turn.
 
-### ast-grep
+Доступны:
 
-Команда `sg` ищет код по структуре AST. Она полезнее обычного текста, когда нужно найти конкретный вызов, импорт, объявление, JSX-элемент или выполнить синтаксически точную замену. Для обычных строк, ключей конфигурации и имён файлов Claude по-прежнему использует `rg`.
+- `auto`;
+- `low`;
+- `medium`;
+- `high`;
+- `xhigh`;
+- `max`.
+
+Значение по умолчанию:
+
+```dotenv
+CLAUDE_CODE_EFFORT_LEVEL=medium
+```
+
+`medium` подходит для обычной разработки. `low` дешевле на простых задачах, но может увеличить число повторных попыток. `high` и выше имеет смысл использовать для сложной отладки и архитектурных изменений.
+
+Prompt suggestions и progress summaries отключены, потому что Telegram-интерфейс уже показывает ход работы. Встроенный skill также просит Claude не генерировать лишние преамбулы, полный diff и длинные логи.
+
+Агрессивный вариант:
+
+```dotenv
+CLAUDE_CODE_DISABLE_THINKING=true
+```
+
+Он может сократить output tokens, но способен ухудшить сложные многошаговые задачи.
+
+## Инструменты экономии контекста
+
+### `rg`
+
+Быстрый точный поиск строк, имён и конфигурационных ключей.
+
+### `ast-grep` (`sg`)
+
+Структурный поиск по AST: вызовы функций, импорты, объявления, JSX и синтаксически точные замены.
+
+### Semble
+
+Включён по умолчанию:
+
+```dotenv
+SEMBLE_ENABLED=true
+```
+
+Используется для semantic code search, когда точное имя символа неизвестно. Работает локально. На первом запуске может потребоваться инициализация локальной модели/индекса.
+
+### Universal Ctags + `jq`
+
+Ctags создаёт дешёвый индекс символов, `jq` позволяет получать из больших JSON только нужные поля вместо передачи всего файла в контекст.
 
 ### Repomix
 
-Repomix используется только для компактной карты незнакомого репозитория и аудита самых тяжёлых каталогов. Skill требует сначала смотреть `--token-count-tree`, затем задавать узкий `--include` и включать `--compress`.
-
-Полный репозиторий автоматически в prompt не упаковывается. На больших проектах это часто не экономит, а расходует больше токенов. Сжатая карта тоже не используется как источник истины перед изменением кода — Claude должен открыть оригинальный файл.
+Используется только для ограниченной карты репозитория. Агент должен сначала смотреть token tree, затем выбирать узкий `--include` и при необходимости `--compress`. Полный repository pack автоматически не отправляется модели.
 
 ### Serena
 
-Serena даёт symbol-level navigation через MCP: обзор символов, поиск определений, references и точечное редактирование. Она установлена в Docker-образ, но по умолчанию выключена:
+По умолчанию выключена:
 
 ```dotenv
 SERENA_ENABLED=false
 ```
 
-Для среднего или большого проекта можно включить:
+Для средних и больших проектов можно включить symbol-level navigation и references:
 
 ```dotenv
 SERENA_ENABLED=true
 ```
 
-После изменения `.env` пересоздайте контейнер:
+### Context7
 
-```bash
-docker compose up -d --build
+По умолчанию выключен, потому что использует внешний сервис:
+
+```dotenv
+CONTEXT7_ENABLED=false
 ```
 
-На маленьком проекте Serena может дать лишнюю задержку на запуск и индексацию, поэтому включать её для всех задач не стоит. При нативном запуске её нужно установить отдельно:
+Он полезен для точечных запросов к актуальной публичной документации библиотек. Не отправляйте через него приватный исходный код.
 
-```bash
-python3 -m venv .venv-serena
-.venv-serena/bin/pip install serena-agent==1.6.1
-```
+Подробнее: `docs/token-efficiency.md` и `docs/search-tools.md`.
 
-и добавить `.venv-serena/bin` в `PATH` процесса ClaudeTG.
+## Permissions
 
-`TOKEN_EFFICIENCY_ENABLED=false` отключает базовый plugin целиком. `MCP_TIMEOUT` задаёт время подключения MCP-сервера в миллисекундах.
+Если действие не разрешено заранее, Telegram показывает approval-кнопки. Можно разрешить один раз, разрешить инструмент до конца сессии, отклонить либо отклонить и остановить turn.
 
-Фиксированной экономии в 70–80% проект не обещает. Результат зависит от размера репозитория, задачи, качества поискового запроса, длины сессии и реализации prompt caching у провайдера. Измерять эффект лучше по `modelUsage`, стоимости одинаковых задач и token tree для фактически выбранных файлов.
+`allowedTools` — предварительные правила разрешения. `disallowedTools` блокирует совпавшие действия. `bypassPermissions` из Telegram недоступен.
 
-## Как работают подтверждения
+Permission modes:
 
-Когда Claude хочет вызвать инструмент, бот либо разрешает действие по настроенным правилам, либо присылает карточку с кнопками:
-
-- разрешить один раз;
-- разрешить этот инструмент до конца сессии;
-- отклонить;
-- отклонить и остановить turn.
-
-`allowedTools` — это правила предварительного разрешения, а не полный список доступных инструментов. `disallowedTools` блокирует совпавшие правила. Режим `bypassPermissions` намеренно недоступен из Telegram.
-
-Доступные permission modes:
-
-- `default` — спрашивать разрешение при необходимости;
-- `acceptEdits` — автоматически принимать файловые изменения;
-- `plan` — работать в режиме планирования;
-- `dontAsk` — отклонять действия, которые нельзя выполнить без вопроса;
-- `auto` — использовать автоматическое решение SDK.
+- `default`;
+- `acceptEdits`;
+- `plan`;
+- `dontAsk`;
+- `auto`.
 
 ## Сессии и данные
 
-Состояние хранится в SQLite внутри каталога `data`. После перезапуска бот видит прежние сессии и может продолжать их по сохранённому SDK session ID.
+Сессии, workflow, история и временные approvals хранятся в SQLite в каталоге `data`. API-ключи в SQLite не записываются.
 
-В базе также хранятся события, workflow и выданные на время сессии разрешения. Количество событий ограничивается параметром `eventRetentionPerSession`.
+После перезапуска ClaudeTG может продолжить сохранённую SDK session по её ID.
 
-Сам API-ключ в SQLite не записывается.
+Предупреждение Node.js про experimental SQLite само по себе не означает ошибку приложения.
+
+## Если бот отвечает на `/new`, но молчит на обычное сообщение
+
+Сначала смотрите:
+
+```bash
+docker compose logs -f claudetg
+```
+
+Частая ошибка конфигурации:
+
+```text
+Provider credential environment variable is missing: ...
+```
+
+Проверьте две вещи:
+
+1. `providers[].auth.env` содержит **имя** переменной, например `AGENTROUTER_API_KEY`;
+2. в `.env` действительно есть `AGENTROUTER_API_KEY=...`.
+
+После изменения `.env` или `config/config.json` пересоздайте контейнер:
+
+```bash
+docker compose up -d --build --force-recreate
+```
+
+Проверить, что переменная попала в контейнер, можно без вывода самого секрета:
+
+```bash
+docker compose exec claudetg sh -lc 'test -n "$AGENTROUTER_API_KEY" && echo configured || echo missing'
+```
+
+Новые версии ClaudeTG также отправляют startup/config errors прямо в Telegram, вместо того чтобы только писать их в Docker log.
 
 ## Безопасность
 
-Этот бот получает право изменять ваши файлы и запускать команды. Относиться к нему нужно как к удалённому доступу к серверу, а не как к обычному чат-боту.
+- ограничьте `TELEGRAM_ALLOWED_USER_IDS`;
+- не монтируйте `/var/run/docker.sock`;
+- не монтируйте корень хоста, домашний каталог и SSH-ключи;
+- запускайте сервис отдельным пользователем;
+- держите реальные API keys только в `.env`/secret store;
+- настройте `disallowedTools`, timeout, max turns и budget;
+- не публикуйте логи, в которых случайно оказался действующий ключ.
 
-Перед запуском стоит проверить следующее:
+Если ключ попал в публичный лог, issue, чат или скриншот, считайте его скомпрометированным и выпустите новый.
 
-- в allowlist указан только ваш Telegram ID;
-- контейнеру смонтированы только нужные каталоги;
-- не подключён `/var/run/docker.sock`;
-- не подключены корень хоста, домашний каталог и SSH-ключи;
-- сервис работает от отдельного пользователя;
-- опасные команды добавлены в `disallowedTools`;
-- лимиты turns, времени и бюджета подходят вашему провайдеру.
-
-Файловые инструменты дополнительно проверяются на выход за разрешённые каталоги. Проверка учитывает `..` и существующие symlink. Но это не заменяет контейнерную или виртуальную изоляцию.
-
-Одобренная Bash-команда выполняется с правами пользователя сервиса и с его сетевым доступом. Подробнее — в [`SECURITY.md`](SECURITY.md).
+Подробнее: [`SECURITY.md`](SECURITY.md).
 
 ## Запуск без Docker
 
@@ -301,11 +420,9 @@ cp config/config.example.json config/config.json
 node --env-file=.env dist/index.js
 ```
 
-При нативном запуске пути в `config/config.json` должны существовать на самом хосте. Готовый unit-файл systemd лежит в `deploy/claudetg.service`.
+При нативном запуске пути из `config/config.json` должны существовать на хосте. Unit для systemd находится в `deploy/claudetg.service`.
 
-Секреты для systemd лучше хранить в `/etc/claudetg/claudetg.env` с правами `0600`.
-
-## Разработка и проверки
+## Разработка
 
 ```bash
 npm install
@@ -313,20 +430,18 @@ npm run typecheck
 npm test
 ```
 
-Тесты проверяют работу SQLite, хранение workflow и событий, redaction секретов, ограничения путей, symlink/traversal, лимиты Telegram-сообщений, форматирование tool use и загрузку efficiency plugins.
-
-GitHub Actions запускает typecheck, тесты и сборку Docker-образа.
+GitHub Actions выполняет typecheck, unit tests и сборку Docker image.
 
 ## Ограничения
 
-ClaudeTG не преобразует OpenAI API в Anthropic API. Провайдер должен сам поддерживать формат Anthropic Messages API, streaming и tool use.
+ClaudeTG не конвертирует OpenAI API в Anthropic API. Provider должен сам поддерживать Anthropic Messages API, streaming и tool use.
 
-Автоматические тесты не могут проверить ваш конкретный endpoint без настоящего ключа. После развёртывания стоит вручную проверить четыре сценария:
+Автотесты не проверяют ваш конкретный provider endpoint без настоящего API key. После развёртывания рекомендуется вручную проверить:
 
 1. обычный текстовый ответ;
 2. чтение файла;
-3. Bash-команду с подтверждением;
-4. вопрос через `AskUserQuestion`.
+3. Bash с approval;
+4. `AskUserQuestion`.
 
 ## Лицензия
 
