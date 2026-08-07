@@ -149,6 +149,13 @@ async function handleProviderProxy(
   if (provider.auth.type === "bearer") headers.set("authorization", `Bearer ${secret}`);
   else headers.set("x-api-key", secret);
 
+  const upstreamAbort = new AbortController();
+  const abortUpstream = (): void => upstreamAbort.abort();
+  request.once("aborted", abortUpstream);
+  response.once("close", () => {
+    if (!response.writableEnded) upstreamAbort.abort();
+  });
+
   const query = url.search || "";
   const upstreamUrl = `${provider.baseUrl}${route.upstreamPath}${query}`;
   let upstream: Response;
@@ -158,8 +165,14 @@ async function handleProviderProxy(
       headers,
       ...(body ? { body } : {}),
       redirect: "manual",
+      signal: upstreamAbort.signal,
     });
   } catch (error) {
+    request.off("aborted", abortUpstream);
+    if (upstreamAbort.signal.aborted) {
+      if (!response.writableEnded) response.end();
+      return;
+    }
     logger.error("Provider proxy request failed", {
       providerId: provider.id,
       path: route.upstreamPath,
@@ -174,12 +187,13 @@ async function handleProviderProxy(
   });
   response.writeHead(upstream.status, outboundHeaders);
   if (!upstream.body) {
+    request.off("aborted", abortUpstream);
     response.end();
     return;
   }
   const reader = upstream.body.getReader();
   try {
-    while (true) {
+    while (!upstreamAbort.signal.aborted) {
       const { done, value } = await reader.read();
       if (done) break;
       if (!response.write(Buffer.from(value))) {
@@ -187,7 +201,9 @@ async function handleProviderProxy(
       }
     }
   } finally {
-    reader.releaseLock();
+    request.off("aborted", abortUpstream);
+    if (upstreamAbort.signal.aborted) void reader.cancel().catch(() => undefined);
+    else reader.releaseLock();
     if (!response.writableEnded) response.end();
   }
 }
