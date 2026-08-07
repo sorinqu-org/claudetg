@@ -53,5 +53,32 @@ jobs:
         with:
           context: .
           target: worker
+          load: true
           push: false
           tags: claudetg-worker:ci
+      - name: Smoke-test worker runtime
+        run: |
+          docker volume create claudetg-ci-home >/dev/null
+          docker run -d --name claudetg-worker-ci \
+            --read-only \
+            --tmpfs /tmp:rw,size=256m,mode=1777 \
+            --tmpfs /run:rw,size=32m,mode=0755 \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            -v claudetg-ci-home:/home/claude \
+            -e CLAUDETG_INTERNAL_TOKEN=ci-internal-token \
+            -e WORKER_PROJECT_ID=main \
+            claudetg-worker:ci
+          for i in $(seq 1 20); do
+            if docker exec claudetg-worker-ci node -e "fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"; then
+              break
+            fi
+            if [ "$i" = 20 ]; then
+              docker logs claudetg-worker-ci
+              exit 1
+            fi
+            sleep 1
+          done
+          test "$(docker exec claudetg-worker-ci sh -lc 'printf %s "$HOME"')" = "/home/claude"
+          docker exec claudetg-worker-ci sh -lc 'mkdir -p ~/.claude/skills/ci && echo ok > ~/.claude/skills/ci/persist'
+          test "$(docker exec claudetg-worker-ci cat /home/claude/.claude/skills/ci/persist)" = "ok"
