@@ -93,7 +93,11 @@ async function handlePermission(
     ...(input.decisionReason ? { decisionReason: input.decisionReason } : {}),
     ...(input.blockedPath ? { blockedPath: input.blockedPath } : {}),
   } as Parameters<typeof canUseTool>[2];
-  const result: PermissionResult = await canUseTool(input.toolName, input.toolInput, options);
+  const decision = await canUseTool(input.toolName, input.toolInput, options);
+  const result: PermissionResult = decision ?? {
+    behavior: "deny",
+    message: "Controller did not return a permission decision.",
+  };
   const payload: WorkerPermissionResponse = { result };
   if (!response.writableEnded) json(response, 200, payload);
 }
