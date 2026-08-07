@@ -10,6 +10,7 @@ export interface WorkerTurnRequest {
   projectId: string;
   projectPath: string;
   additionalDirectories: string[];
+  prompt: string;
   model: string;
   permissionMode: PermissionMode;
   allowedTools: string[];
