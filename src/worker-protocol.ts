@@ -1,5 +1,6 @@
-import type { PermissionMode, PermissionResult, SettingSource } from "@anthropic-ai/claude-agent-sdk";
+import type { PermissionMode, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import type { EffortSetting } from "./agent/efficiency.js";
+import type { SettingSource } from "./domain.js";
 
 export interface WorkerTurnRequest {
   runId: string;
