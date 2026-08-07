@@ -6,8 +6,8 @@ import type { RuntimeConfig, SessionRecord, UserSettings } from "./domain.js";
 import { EffortStore } from "./effort-store.js";
 import type { Logger } from "./logger.js";
 import { errorFields } from "./logger.js";
-import { inspectProjectSettings } from "./settings-inspector.js";
 import { escapeHtml, expandableBlockquote, formatDuration, formatMoney, splitText, truncate } from "./telegram/format.js";
+import { WorkerClient } from "./worker-client.js";
 import { AgentRunner } from "./agent/runner.js";
 import { InteractionBroker } from "./agent/interaction-broker.js";
 import { resolveEffortLevel, type EffortSetting } from "./agent/efficiency.js";
@@ -133,7 +133,7 @@ export class ClaudeTelegramApp {
   }
 
   private async help(ctx: Context): Promise<void> {
-    await ctx.reply(["<b>ClaudeTG</b> — Claude Agent SDK в Telegram.", "", "Отправьте обычный текст для запуска turn.", "Tool use свёрнут; approvals и вопросы интерактивны.", "", "/new · /sessions · /project · /provider · /model · /mode · /effort", "/status · /workflow · /tools · /settings · /history", "/stop · /cancel · /clearapprovals · /rename · /close"].join("\n"), { parse_mode: "HTML" });
+    await ctx.reply(["<b>ClaudeTG</b> — Claude Agent SDK в Telegram.", "", "Отправьте обычный текст для запуска turn.", "Claude работает в отдельном Docker worker; tool use свёрнут, approvals и вопросы интерактивны.", "", "/new · /sessions · /project · /provider · /model · /mode · /effort", "/status · /workflow · /tools · /settings · /history", "/stop · /cancel · /clearapprovals · /rename · /close"].join("\n"), { parse_mode: "HTML" });
   }
 
   private async sessions(ctx: Context): Promise<void> {
@@ -166,7 +166,7 @@ export class ClaudeTelegramApp {
 
   private async status(ctx: Context): Promise<void> {
     const s = this.database.getActiveSession(ctx.chat!.id); if (!s) return void await ctx.reply("Нет сессии."); const run = this.runner.getActive(ctx.chat!.id); const p = getProject(this.config, s.projectId);
-    const lines = [`${icon(run ? "running" : s.status)} <b>${escapeHtml(s.title)}</b>`, `ID: <code>${shortId(s.id)}</code>`, `Project: <code>${escapeHtml(p.name)}</code>`, `Provider: <code>${escapeHtml(s.providerId)}</code>`, `Model: <code>${escapeHtml(s.modelId)}</code>`, `Mode: <code>${escapeHtml(s.permissionMode)}</code>`, `Effort: <code>${escapeHtml(this.effortFor(s))}</code>`, `SDK session: <code>${escapeHtml(s.sdkSessionId ?? "not started")}</code>`, `Queue: ${this.runner.queueLength(ctx.chat!.id)}`, `Turns: ${s.totalTurns} · Cost: ${formatMoney(s.totalCostUsd)}`, run ? `Running: ${formatDuration(Date.now() - run.startedAt)}` : undefined, s.lastError ? `Last error: ${escapeHtml(truncate(s.lastError, 1000))}` : undefined].filter(Boolean);
+    const lines = [`${icon(run ? "running" : s.status)} <b>${escapeHtml(s.title)}</b>`, `ID: <code>${shortId(s.id)}</code>`, `Project: <code>${escapeHtml(p.name)}</code>`, `Worker: <code>${escapeHtml(p.workerUrl)}</code>`, `Workspace: <code>${escapeHtml(p.path)}</code>`, `Provider: <code>${escapeHtml(s.providerId)}</code>`, `Model: <code>${escapeHtml(s.modelId)}</code>`, `Mode: <code>${escapeHtml(s.permissionMode)}</code>`, `Effort: <code>${escapeHtml(this.effortFor(s))}</code>`, `SDK session: <code>${escapeHtml(s.sdkSessionId ?? "not started")}</code>`, `Queue: ${this.runner.queueLength(ctx.chat!.id)}`, `Turns: ${s.totalTurns} · Cost: ${formatMoney(s.totalCostUsd)}`, run ? `Running: ${formatDuration(Date.now() - run.startedAt)}` : undefined, s.lastError ? `Last error: ${escapeHtml(truncate(s.lastError, 1000))}` : undefined].filter(Boolean);
     await ctx.reply(lines.join("\n"), { parse_mode: "HTML" });
   }
 
@@ -174,7 +174,28 @@ export class ClaudeTelegramApp {
 
   private async tools(ctx: Context): Promise<void> { const s = this.database.getActiveSession(ctx.chat!.id); if (!s) return void await ctx.reply("Нет сессии."); const p = getProject(this.config, s.projectId); const r = s.runtime ?? {}; await this.long(ctx, [`<b>Allow rules</b>: ${escapeHtml((p.allowedTools ?? []).join(", ") || "none")}`, `<b>Auto reads</b>: ${p.autoAllowReadTools ?? true}`, `<b>Deny rules</b>: ${escapeHtml((p.disallowedTools ?? []).join(", ") || "none")}`, `<b>Session approvals</b>: ${escapeHtml(s.sessionAllowedTools.join(", ") || "none")}`, `<b>Runtime tools</b>: ${escapeHtml(Array.isArray(r.tools) ? r.tools.map(String).join(", ") : "not initialized")}`, `<b>Skills</b>: ${escapeHtml(Array.isArray(r.skills) ? r.skills.map(String).join(", ") : "none")}`, `<b>Slash commands</b>: ${escapeHtml(Array.isArray(r.slashCommands) ? r.slashCommands.map(String).join(", ") : "none")}`, `<b>MCP</b>: ${escapeHtml(r.mcpServers ? truncate(JSON.stringify(r.mcpServers), 1800) : "none")}`].join("\n\n")); }
 
-  private async settings(ctx: Context): Promise<void> { const s = this.database.getActiveSession(ctx.chat!.id); if (!s) return void await ctx.reply("Нет сессии."); const p = getProject(this.config, s.projectId); const provider = getProvider(this.config, s.providerId); const secret = process.env[provider.auth.env]?.trim(); await ctx.reply([`<b>Config</b>: <code>${escapeHtml(this.config.configPath)}</code>`, `<b>Project</b>: <code>${escapeHtml(p.path)}</code>`, `<b>Base URL</b>: <code>${escapeHtml(provider.baseUrl)}</code>`, `<b>Auth</b>: ${provider.auth.type} via <code>${escapeHtml(provider.auth.env)}</code>`, `<b>Model</b>: <code>${escapeHtml(s.modelId)}</code>`, `<b>Effort</b>: <code>${escapeHtml(this.effortFor(s))}</code>`].join("\n"), { parse_mode: "HTML" }); const files = inspectProjectSettings(p.path, secret ? [secret] : []); if (!files.length) return void await ctx.reply("Claude settings не найдены."); for (const f of files) await this.long(ctx, `<b>${escapeHtml(f.path)}</b>\n${expandableBlockquote(f.content)}`); }
+  private async settings(ctx: Context): Promise<void> {
+    const s = this.database.getActiveSession(ctx.chat!.id); if (!s) return void await ctx.reply("Нет сессии.");
+    const p = getProject(this.config, s.projectId); const provider = getProvider(this.config, s.providerId);
+    const worker = new WorkerClient(p.workerUrl, this.config.internalWorkerToken, this.logger);
+    await ctx.reply([
+      `<b>Controller config</b>: <code>${escapeHtml(this.config.configPath)}</code>`,
+      `<b>Worker</b>: <code>${escapeHtml(p.workerUrl)}</code>`,
+      `<b>Worker workspace</b>: <code>${escapeHtml(p.path)}</code>`,
+      `<b>Provider</b>: <code>${escapeHtml(provider.baseUrl)}</code>`,
+      `<b>Provider auth</b>: ${provider.auth.type} via controller-only <code>${escapeHtml(provider.auth.env)}</code>`,
+      `<b>Model</b>: <code>${escapeHtml(s.modelId)}</code>`,
+      `<b>Effort</b>: <code>${escapeHtml(this.effortFor(s))}</code>`,
+    ].join("\n"), { parse_mode: "HTML" });
+    try {
+      const snapshot = await worker.inspectSettings(p.id);
+      await ctx.reply(`Worker HOME: <code>${escapeHtml(snapshot.home)}</code>\nWorkspace: <code>${escapeHtml(snapshot.workspace)}</code>`, { parse_mode: "HTML" });
+      if (!snapshot.files.length) return void await ctx.reply("Claude settings не найдены в worker HOME/workspace.");
+      for (const file of snapshot.files) await this.long(ctx, `<b>${escapeHtml(file.path)}</b>\n${expandableBlockquote(file.content)}`);
+    } catch (error) {
+      await ctx.reply(`Не удалось прочитать настройки worker: ${escapeHtml(error instanceof Error ? error.message : String(error))}`, { parse_mode: "HTML" });
+    }
+  }
 
   private async history(ctx: Context): Promise<void> {
     const s = this.database.getActiveSession(ctx.chat!.id);
