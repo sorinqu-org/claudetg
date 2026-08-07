@@ -61,7 +61,7 @@ export class WorkerClient {
   async inspectSettings(projectId: string, signal?: AbortSignal): Promise<WorkerSettingsResponse> {
     const response = await fetch(workerEndpoint(this.workerUrl, `/v1/settings?projectId=${encodeURIComponent(projectId)}`), {
       headers: { "x-claudetg-internal-token": this.internalToken },
-      signal,
+      ...(signal ? { signal } : {}),
     });
     if (!response.ok) throw new Error(`Worker settings endpoint returned HTTP ${response.status}`);
     return await response.json() as WorkerSettingsResponse;
@@ -69,7 +69,7 @@ export class WorkerClient {
 
   async health(signal?: AbortSignal): Promise<boolean> {
     try {
-      const response = await fetch(workerEndpoint(this.workerUrl, "/healthz"), { signal });
+      const response = await fetch(workerEndpoint(this.workerUrl, "/healthz"), signal ? { signal } : undefined);
       return response.ok;
     } catch {
       return false;
