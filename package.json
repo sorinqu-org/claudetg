@@ -1,8 +1,8 @@
 {
   "name": "claudetg",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Production Telegram interface for Claude Agent SDK and Claude Code workflows",
+  "description": "Telegram controller and isolated Claude Agent SDK workers",
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
@@ -12,6 +12,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test dist/tests/*.test.js",
     "start": "node --enable-source-maps dist/index.js",
+    "start:worker": "node --enable-source-maps dist/worker.js",
     "dev": "npm run build && node --watch --enable-source-maps dist/index.js"
   },
   "dependencies": {
