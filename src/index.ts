@@ -1,7 +1,7 @@
 import { ClaudeTelegramApp } from "./app.js";
 import { loadRuntimeConfig } from "./config.js";
+import { startControlServer } from "./control-server.js";
 import { Database } from "./db.js";
-import { startHealthServer } from "./health.js";
 import { Logger, errorFields } from "./logger.js";
 
 async function main(): Promise<void> {
@@ -9,7 +9,7 @@ async function main(): Promise<void> {
   const logger = new Logger(config.logLevel);
   const database = new Database(config.databasePath, config.agent.eventRetentionPerSession);
   const app = new ClaudeTelegramApp(config, database, logger);
-  const health = startHealthServer(config.healthPort, logger);
+  const control = startControlServer(config, app.broker, logger);
   let shuttingDown = false;
 
   const shutdown = async (signal: string): Promise<void> => {
@@ -18,7 +18,7 @@ async function main(): Promise<void> {
     logger.info("Shutting down", { signal });
     try {
       await app.stop();
-      await new Promise<void>((resolve) => health.close(() => resolve()));
+      await new Promise<void>((resolve) => control.close(() => resolve()));
       database.close();
     } finally {
       process.exit(0);
