@@ -2,6 +2,7 @@ services:
   claudetg:
     build:
       context: .
+      target: controller
     restart: unless-stopped
     init: true
     env_file:
@@ -11,20 +12,75 @@ services:
       DATA_DIR: /app/data
       HOME: /app/data/home
       HEALTH_PORT: 3000
+      CLAUDETG_INTERNAL_TOKEN: ${CLAUDETG_INTERNAL_TOKEN:?set CLAUDETG_INTERNAL_TOKEN in .env}
+      CLAUDETG_CONTROLLER_INTERNAL_URL: http://claudetg:3000
     volumes:
       - ./config/config.json:/app/config/config.json:ro
       - ./data:/app/data
-      - /srv/projects:/workspace:rw
     read_only: true
     tmpfs:
-      - /tmp:size=512m,mode=1777
+      - /tmp:size=256m,mode=1777
     security_opt:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    depends_on:
+      worker-main:
+        condition: service_healthy
     healthcheck:
       test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3000/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 20s
+      start_period: 10s
+    networks:
+      - claudetg
+
+  worker-main:
+    build:
+      context: .
+      target: worker
+    restart: unless-stopped
+    init: true
+    environment:
+      WORKER_PORT: 3100
+      WORKER_PROJECT_ID: main
+      WORKSPACE_PATH: /workspace
+      HOME: /home/claude
+      CLAUDETG_CONTROLLER_URL: http://claudetg:3000
+      CLAUDETG_INTERNAL_TOKEN: ${CLAUDETG_INTERNAL_TOKEN:?set CLAUDETG_INTERNAL_TOKEN in .env}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      TOKEN_EFFICIENCY_ENABLED: ${TOKEN_EFFICIENCY_ENABLED:-true}
+      SEMBLE_ENABLED: ${SEMBLE_ENABLED:-true}
+      SERENA_ENABLED: ${SERENA_ENABLED:-false}
+      CONTEXT7_ENABLED: ${CONTEXT7_ENABLED:-false}
+      MCP_TIMEOUT: ${MCP_TIMEOUT:-60000}
+      CLAUDE_CODE_EFFORT_LEVEL: ${CLAUDE_CODE_EFFORT_LEVEL:-medium}
+      CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION: ${CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION:-false}
+      CLAUDE_CODE_DISABLE_THINKING: ${CLAUDE_CODE_DISABLE_THINKING:-false}
+    volumes:
+      - ${CLAUDETG_PROJECT_PATH:-/srv/projects/main}:/workspace:rw
+      - claude_home_main:/home/claude
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g,mode=1777
+      - /run:size=64m,mode=0755
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3100/healthz').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    networks:
+      - claudetg
+
+volumes:
+  claude_home_main:
+
+networks:
+  claudetg:
+    driver: bridge

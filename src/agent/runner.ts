@@ -1,20 +1,17 @@
+import { randomUUID } from "node:crypto";
+import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Api, RawApi } from "grammy";
-import {
-  query,
-  type HookCallback,
-  type Options,
-  type PreToolUseHookInput,
-  type SDKMessage,
-} from "@anthropic-ai/claude-agent-sdk";
-import { getProject, getProvider, assertProviderModel } from "../config.js";
+import { assertProviderModel, getProject, getProvider } from "../config.js";
 import type { Database } from "../db.js";
 import type { RuntimeConfig, SessionRecord } from "../domain.js";
 import type { EffortStore } from "../effort-store.js";
 import type { Logger } from "../logger.js";
 import { errorFields } from "../logger.js";
-import { collectPathViolations, redactText } from "../security.js";
+import { redactText } from "../security.js";
 import { escapeHtml, truncate } from "../telegram/format.js";
-import { buildEfficiencyEnvironment, buildEfficiencyPlugins, resolveEffortLevel, type EffortSetting } from "./efficiency.js";
+import { WorkerClient } from "../worker-client.js";
+import type { WorkerTurnRequest } from "../worker-protocol.js";
+import { resolveEffortLevel } from "./efficiency.js";
 import { InteractionBroker } from "./interaction-broker.js";
 import { AgentMessageRenderer } from "./message-renderer.js";
 
@@ -29,71 +26,6 @@ interface QueuedPrompt {
   text: string;
 }
 
-const SAFE_ENV_NAMES = [
-  "PATH",
-  "HOME",
-  "USER",
-  "LOGNAME",
-  "SHELL",
-  "TMPDIR",
-  "TEMP",
-  "TMP",
-  "LANG",
-  "LC_ALL",
-  "TERM",
-  "COLORTERM",
-] as const;
-
-function buildAgentEnv(
-  config: RuntimeConfig,
-  session: SessionRecord,
-  effort: EffortSetting,
-): { env: Record<string, string | undefined>; secrets: string[] } {
-  const project = getProject(config, session.projectId);
-  const provider = getProvider(config, session.providerId);
-  assertProviderModel(provider, session.modelId);
-  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(provider.auth.env)) {
-    throw new Error("Provider auth.env must contain an environment variable name (for example AGENTROUTER_API_KEY), not the API key itself.");
-  }
-  const secret = process.env[provider.auth.env]?.trim();
-  if (!secret) throw new Error(`Provider credential environment variable is missing: ${provider.auth.env}`);
-  const env: Record<string, string | undefined> = {};
-  for (const name of SAFE_ENV_NAMES) {
-    if (process.env[name] !== undefined) env[name] = process.env[name];
-  }
-  Object.assign(env, buildEfficiencyEnvironment(env.PATH, effort));
-  for (const name of project.passEnv ?? []) {
-    if (process.env[name] !== undefined) env[name] = process.env[name];
-  }
-  Object.assign(env, provider.extraEnv ?? {});
-  env.ANTHROPIC_BASE_URL = provider.baseUrl;
-  env.ANTHROPIC_MODEL = session.modelId;
-  const modelName = session.modelId.toLowerCase();
-  if (modelName.includes("opus")) env.ANTHROPIC_DEFAULT_OPUS_MODEL = session.modelId;
-  if (modelName.includes("sonnet")) env.ANTHROPIC_DEFAULT_SONNET_MODEL = session.modelId;
-  if (modelName.includes("haiku")) env.ANTHROPIC_DEFAULT_HAIKU_MODEL = session.modelId;
-  env.CLAUDE_AGENT_SDK_CLIENT_APP = "claudetg/1.0.0";
-  env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = "1";
-  env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB = "1";
-  env.CLAUDE_BASH_MAINTAIN_PROJECT_WORKING_DIR = "1";
-  if ((project.additionalDirectories?.length ?? 0) > 0) {
-    env.CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD = "1";
-  }
-  if (provider.auth.type === "bearer") {
-    env.ANTHROPIC_AUTH_TOKEN = secret;
-    delete env.ANTHROPIC_API_KEY;
-  } else {
-    env.ANTHROPIC_API_KEY = secret;
-    delete env.ANTHROPIC_AUTH_TOKEN;
-  }
-  const secrets = [
-    secret,
-    ...(project.passEnv ?? []).map((name) => process.env[name] ?? ""),
-    ...Object.values(provider.extraEnv ?? {}),
-  ].filter((value) => value.length >= 6);
-  return { env, secrets: [...new Set(secrets)] };
-}
-
 function sdkSessionId(message: SDKMessage): string | undefined {
   const value = (message as unknown as Record<string, unknown>).session_id;
   return typeof value === "string" && value ? value : undefined;
@@ -104,58 +36,18 @@ function resultRecord(message: SDKMessage): Record<string, unknown> | undefined 
   return record.type === "result" ? record : undefined;
 }
 
-function buildPolicyHooks(input: {
-  api: Api<RawApi>;
-  database: Database;
-  logger: Logger;
-  chatId: number;
-  sessionId: string;
-  allowedRoots: string[];
-  autoAllowReadTools: boolean;
-  secrets: string[];
-}): NonNullable<Options["hooks"]> {
-  const callback: HookCallback = async (rawInput) => {
-    const hookInput = rawInput as PreToolUseHookInput;
-    if (hookInput.hook_event_name !== "PreToolUse") return {};
-    const toolName = hookInput.tool_name;
-    const toolInput = hookInput.tool_input && typeof hookInput.tool_input === "object"
-      ? hookInput.tool_input as Record<string, unknown>
-      : {};
-    const cwd = typeof hookInput.cwd === "string" ? hookInput.cwd : input.allowedRoots[0];
-    const violations = collectPathViolations(toolInput, input.allowedRoots, cwd);
-    if (violations.length > 0) {
-      const reason = `Blocked path outside configured project roots: ${violations.join(", ")}`;
-      input.database.addEvent(input.sessionId, "host_policy_denied", `${toolName}: ${redactText(reason, input.secrets)}`);
-      await input.api.sendMessage(
-        input.chatId,
-        `🛡️ <b>Blocked by host policy</b>\n${escapeHtml(redactText(reason, input.secrets))}`,
-        { parse_mode: "HTML" },
-      ).catch((error: unknown) => input.logger.debug("Could not send host-policy denial", { error: String(error) }));
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "deny",
-          permissionDecisionReason: reason,
-        },
-      };
-    }
-    if (input.autoAllowReadTools && ["Read", "Glob", "Grep"].includes(toolName)) {
-      return {
-        hookSpecificOutput: {
-          hookEventName: "PreToolUse",
-          permissionDecision: "allow",
-          permissionDecisionReason: "Read-only tool inside configured project roots",
-        },
-      };
-    }
-    return {};
-  };
-  return {
-    PreToolUse: [{
-      matcher: "^(Read|Write|Edit|NotebookEdit|Glob|Grep)$",
-      hooks: [callback],
-    }],
-  };
+function providerSecrets(config: RuntimeConfig, session: SessionRecord): string[] {
+  const provider = getProvider(config, session.providerId);
+  if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(provider.auth.env)) {
+    throw new Error("Provider auth.env must contain an environment variable name (for example AGENTROUTER_API_KEY), not the API key itself.");
+  }
+  const secret = process.env[provider.auth.env]?.trim();
+  if (!secret) throw new Error(`Provider credential environment variable is missing: ${provider.auth.env}`);
+  return [secret, ...Object.values(provider.extraEnv ?? {})].filter((value) => value.length >= 6);
+}
+
+function controllerInternalUrl(config: RuntimeConfig): string {
+  return (process.env.CLAUDETG_CONTROLLER_INTERNAL_URL?.trim() || `http://claudetg:${config.healthPort}`).replace(/\/+$/, "");
 }
 
 export class AgentRunner {
@@ -221,7 +113,7 @@ export class AgentRunner {
         this.database.updateSession(session.id, { status: "error", lastError: truncate(message, 2000) });
         this.database.addEvent(session.id, "startup_error", truncate(message, 1000));
       }
-      this.logger.error("Uncaught agent turn failure", { chatId, error: message });
+      this.logger.error("Uncaught agent turn failure", { chatId, ...errorFields(error) });
       await this.api.sendMessage(
         chatId,
         `❌ <b>Не удалось запустить Claude</b>\n${escapeHtml(message)}`,
@@ -252,21 +144,24 @@ export class AgentRunner {
     const project = getProject(this.config, session.projectId);
     const provider = getProvider(this.config, session.providerId);
     assertProviderModel(provider, session.modelId);
+    const secrets = providerSecrets(this.config, session);
     const effort = this.effortStore.get(session.id) ?? resolveEffortLevel();
-    const { env, secrets } = buildAgentEnv(this.config, session, effort);
     const abortController = new AbortController();
     this.active.set(chatId, { sessionId: session.id, abortController, startedAt: Date.now() });
     this.database.updateSession(session.id, { status: "running", lastError: null });
     this.database.addEvent(session.id, "user", truncate(prompt, 1000));
+
     await this.api.sendMessage(
       chatId,
       `▶️ <b>${escapeHtml(session.title)}</b>\n` +
         `Project: <code>${escapeHtml(project.name)}</code>\n` +
+        `Worker: <code>${escapeHtml(project.workerUrl)}</code>\n` +
         `Model: <code>${escapeHtml(session.modelId)}</code>\n` +
         `Mode: <code>${escapeHtml(session.permissionMode)}</code>\n` +
         `Effort: <code>${escapeHtml(effort)}</code>`,
       { parse_mode: "HTML" },
     );
+
     const renderer = new AgentMessageRenderer(
       this.api,
       chatId,
@@ -277,66 +172,42 @@ export class AgentRunner {
       this.config.agent.maxToolDetailChars,
       secrets,
     );
+    const worker = new WorkerClient(project.workerUrl, this.config.internalWorkerToken, this.logger);
     let timeout: NodeJS.Timeout | undefined;
     let finalResult: Record<string, unknown> | undefined;
     let latestSdkSessionId = session.sdkSessionId;
+
     try {
       timeout = setTimeout(() => abortController.abort(), this.config.agent.turnTimeoutMs);
-      const allowedRoots = [project.path, ...(project.additionalDirectories ?? [])];
-      const autoAllowReadTools = project.autoAllowReadTools ?? true;
-      const canUseTool = this.broker.createCanUseTool({
+      const available = await worker.health(abortController.signal);
+      if (!available) throw new Error(`Claude worker is unavailable: ${project.workerUrl}`);
+
+      const request: WorkerTurnRequest = {
+        runId: randomUUID(),
         chatId,
         userId,
         sessionId: session.id,
-        allowedRoots,
-        autoAllowReadTools,
-      });
-      const options: Options = {
-        abortController,
-        cwd: project.path,
+        projectId: project.id,
+        projectPath: project.path,
         additionalDirectories: project.additionalDirectories ?? [],
+        prompt,
         model: session.modelId,
         permissionMode: session.permissionMode,
         allowedTools: project.allowedTools ?? [],
         disallowedTools: project.disallowedTools ?? [],
-        canUseTool,
-        hooks: buildPolicyHooks({
-          api: this.api,
-          database: this.database,
-          logger: this.logger,
-          chatId,
-          sessionId: session.id,
-          allowedRoots,
-          autoAllowReadTools,
-          secrets,
-        }),
-        env,
-        includePartialMessages: true,
-        includeHookEvents: true,
-        forwardSubagentText: true,
-        agentProgressSummaries: false,
-        promptSuggestions: false,
-        maxTurns: this.config.agent.maxTurns,
-        tools: { type: "preset", preset: "claude_code" },
-        plugins: buildEfficiencyPlugins(),
-        systemPrompt: {
-          type: "preset",
-          preset: "claude_code",
-          ...(project.systemPromptAppend ? { append: project.systemPromptAppend } : {}),
-        },
-        settingSources: project.settingSources ?? ["project", "local"],
-        strictMcpConfig: false,
-        persistSession: true,
+        settingSources: project.settingSources ?? ["user", "project", "local"],
+        autoAllowReadTools: project.autoAllowReadTools ?? true,
+        ...(project.systemPromptAppend ? { systemPromptAppend: project.systemPromptAppend } : {}),
         title: session.title,
-        toolConfig: { askUserQuestion: { previewFormat: "markdown" } },
-        stderr: (data) => this.logger.debug("Claude Agent SDK stderr", {
-          sessionId: session.id,
-          data: truncate(redactText(data, secrets), 2000),
-        }),
-        ...(session.sdkSessionId ? { resume: session.sdkSessionId } : {}),
+        effort,
+        maxTurns: this.config.agent.maxTurns,
         ...(this.config.agent.maxBudgetUsd !== undefined ? { maxBudgetUsd: this.config.agent.maxBudgetUsd } : {}),
+        ...(session.sdkSessionId ? { sdkSessionId: session.sdkSessionId } : {}),
+        providerProxyUrl: `${controllerInternalUrl(this.config)}/provider-proxy/${encodeURIComponent(provider.id)}`,
+        passEnv: project.passEnv ?? [],
       };
-      for await (const message of query({ prompt, options })) {
+
+      await worker.runTurn(request, abortController.signal, async (message) => {
         const id = sdkSessionId(message);
         if (id && id !== latestSdkSessionId) {
           latestSdkSessionId = id;
@@ -345,7 +216,8 @@ export class AgentRunner {
         const result = resultRecord(message);
         if (result) finalResult = result;
         await renderer.handle(message);
-      }
+      });
+
       const isError = finalResult?.is_error === true || (
         typeof finalResult?.subtype === "string" && finalResult.subtype !== "success"
       );
@@ -369,12 +241,8 @@ export class AgentRunner {
         ...(latestSdkSessionId ? { sdkSessionId: latestSdkSessionId } : {}),
       });
       this.database.addEvent(session.id, aborted ? "stopped" : "error", truncate(message, 1000));
-      await this.api.sendMessage(
-        chatId,
-        `${aborted ? "⛔" : "❌"} ${escapeHtml(message)}`,
-        { parse_mode: "HTML" },
-      );
-      if (!aborted) this.logger.error("Agent turn failed", { chatId, sessionId: session.id, ...errorFields(error) });
+      await this.api.sendMessage(chatId, `${aborted ? "⛔" : "❌"} ${escapeHtml(message)}`, { parse_mode: "HTML" });
+      if (!aborted) this.logger.error("Remote agent turn failed", { chatId, sessionId: session.id, workerUrl: project.workerUrl, ...errorFields(error) });
     } finally {
       if (timeout) clearTimeout(timeout);
       await renderer.close().catch((error: unknown) => {

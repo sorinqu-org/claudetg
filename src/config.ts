@@ -1,4 +1,4 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import path from "node:path";
 import type {
@@ -73,6 +73,20 @@ function asPositiveNumber(value: unknown, label: string, fallback: number): numb
   return value;
 }
 
+function validateUrl(raw: string, label: string, allowHttp = false): string {
+  const value = raw.replace(/\/+$/, "");
+  try {
+    const url = new URL(value);
+    if (url.protocol !== "https:" && url.protocol !== "http:") throw new Error("must use http or https");
+    if (!allowHttp && url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
+      throw new Error("must use HTTPS unless it is localhost");
+    }
+  } catch (error) {
+    throw new Error(`${label} is invalid: ${String(error)}`);
+  }
+  return value;
+}
+
 function parseProvider(raw: unknown, index: number): ProviderConfig {
   const value = asObject(raw, `providers[${index}]`);
   const auth = asObject(value.auth, `providers[${index}].auth`);
@@ -92,15 +106,7 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
       ...(typeof description === "string" && description.trim() ? { description: description.trim() } : {}),
     };
   });
-  const baseUrl = asString(value.baseUrl, `providers[${index}].baseUrl`).replace(/\/+$/, "");
-  try {
-    const url = new URL(baseUrl);
-    if (url.protocol !== "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1") {
-      throw new Error("must use HTTPS unless it is localhost");
-    }
-  } catch (error) {
-    throw new Error(`providers[${index}].baseUrl is invalid: ${String(error)}`);
-  }
+  const baseUrl = validateUrl(asString(value.baseUrl, `providers[${index}].baseUrl`), `providers[${index}].baseUrl`);
   const extraEnvRaw = value.extraEnv;
   const extraEnv = extraEnvRaw === undefined ? undefined : asObject(extraEnvRaw, `providers[${index}].extraEnv`);
   if (extraEnv && Object.values(extraEnv).some((item) => typeof item !== "string")) {
@@ -121,10 +127,13 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
 
 function parseProject(raw: unknown, index: number): ProjectConfig {
   const value = asObject(raw, `projects[${index}]`);
-  const projectPath = path.resolve(asString(value.path, `projects[${index}].path`));
-  if (!existsSync(projectPath) || !statSync(projectPath).isDirectory()) {
-    throw new Error(`projects[${index}].path does not exist or is not a directory: ${projectPath}`);
-  }
+  const projectPath = path.posix.normalize(asString(value.path, `projects[${index}].path`));
+  if (!projectPath.startsWith("/")) throw new Error(`projects[${index}].path must be an absolute path inside the worker`);
+  const workerUrl = validateUrl(
+    typeof value.workerUrl === "string" && value.workerUrl.trim() ? value.workerUrl.trim() : "http://worker-main:3100",
+    `projects[${index}].workerUrl`,
+    true,
+  );
   const permissionModeRaw = value.permissionMode;
   const permissionMode = permissionModeRaw === undefined
     ? undefined
@@ -132,7 +141,7 @@ function parseProject(raw: unknown, index: number): ProjectConfig {
   if (permissionMode && !PERMISSION_MODES.has(permissionMode)) {
     throw new Error(`projects[${index}].permissionMode is unsupported`);
   }
-  const settingSourcesRaw = asStringArray(value.settingSources, `projects[${index}].settingSources`, ["project", "local"]);
+  const settingSourcesRaw = asStringArray(value.settingSources, `projects[${index}].settingSources`, ["user", "project", "local"]);
   const settingSources = settingSourcesRaw.map((source) => {
     if (!SETTING_SOURCES.has(source as SettingSource)) {
       throw new Error(`projects[${index}].settingSources contains unsupported source: ${source}`);
@@ -143,12 +152,13 @@ function parseProject(raw: unknown, index: number): ProjectConfig {
     id: asString(value.id, `projects[${index}].id`),
     name: asString(value.name, `projects[${index}].name`),
     path: projectPath,
+    workerUrl,
     providerId: asString(value.providerId, `projects[${index}].providerId`),
     modelId: asString(value.modelId, `projects[${index}].modelId`),
     ...(permissionMode ? { permissionMode } : {}),
     allowedTools: asStringArray(value.allowedTools, `projects[${index}].allowedTools`),
     disallowedTools: asStringArray(value.disallowedTools, `projects[${index}].disallowedTools`),
-    additionalDirectories: asStringArray(value.additionalDirectories, `projects[${index}].additionalDirectories`).map((item) => path.resolve(item)),
+    additionalDirectories: asStringArray(value.additionalDirectories, `projects[${index}].additionalDirectories`).map((item) => path.posix.normalize(item)),
     settingSources,
     passEnv: asStringArray(value.passEnv, `projects[${index}].passEnv`),
     autoAllowReadTools: asBoolean(value.autoAllowReadTools, `projects[${index}].autoAllowReadTools`, true),
@@ -193,11 +203,6 @@ function parseFileConfig(raw: unknown): AppFileConfig {
     if (!provider.models.some((model) => model.id === project.modelId)) {
       throw new Error(`Project ${project.id} references unknown model ${project.modelId}`);
     }
-    for (const directory of project.additionalDirectories ?? []) {
-      if (!existsSync(directory) || !statSync(directory).isDirectory()) {
-        throw new Error(`Additional directory does not exist for project ${project.id}: ${directory}`);
-      }
-    }
   }
   const defaultProjectId = asString(value.defaultProjectId, "defaultProjectId");
   if (!projectIds.has(defaultProjectId)) throw new Error(`Unknown defaultProjectId: ${defaultProjectId}`);
@@ -235,6 +240,7 @@ export async function loadRuntimeConfig(): Promise<RuntimeConfig> {
     healthPort: parseInteger(process.env.HEALTH_PORT, 3000, "HEALTH_PORT"),
     logLevel: logLevelRaw,
     configPath,
+    internalWorkerToken: requiredEnv("CLAUDETG_INTERNAL_TOKEN"),
   };
 }
 

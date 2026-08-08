@@ -25,7 +25,10 @@ export interface ProviderConfig {
 export interface ProjectConfig {
   id: string;
   name: string;
+  /** Path inside the worker container, normally /workspace. */
   path: string;
+  /** Internal HTTP address of the isolated Claude worker for this project. */
+  workerUrl: string;
   providerId: string;
   modelId: string;
   permissionMode?: PermissionMode;
@@ -65,6 +68,7 @@ export interface RuntimeConfig extends AppFileConfig {
   healthPort: number;
   logLevel: LogLevel;
   configPath: string;
+  internalWorkerToken: string;
 }
 
 export type LogLevel = "debug" | "info" | "warn" | "error";

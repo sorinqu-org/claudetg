@@ -1,36 +1,70 @@
 # ClaudeTG
 
-ClaudeTG запускает Claude Agent SDK на вашем сервере и использует Telegram как интерфейс. Можно отправлять задачи с телефона, получать потоковый ответ, видеть tool use, подтверждать действия, отвечать на `AskUserQuestion`, переключать модели и продолжать сохранённые Claude-сессии.
+ClaudeTG — self-hosted Telegram-интерфейс для Claude Agent SDK. Бот принимает задачи, показывает streaming-ответы и tool use, передаёт approvals и `AskUserQuestion`, хранит сессии и позволяет переключать модель, permission mode и effort.
 
-Проект рассчитан на self-hosted установку и работает с Anthropic-compatible API providers. В примерах ниже используется `claude-opus-4-8`.
+Claude запускается не в контейнере Telegram-бота, а в отдельном **worker-контейнере для проекта**. Это сделано специально: worker получает только нужный workspace и собственный persistent HOME, а API-ключ провайдера остаётся в controller и никогда не передаётся Claude Code.
+
+## Как это устроено
+
+```text
+Telegram
+   │
+   ▼
+claudetg controller
+├── Telegram Bot API
+├── SQLite / sessions / approvals
+├── provider credential
+└── Anthropic-compatible proxy
+        │
+        │ internal Docker network
+        ▼
+worker-main
+├── Claude Agent SDK / Claude Code
+├── /workspace        ← только выбранный проект
+├── /home/claude      ← persistent Docker volume
+│   └── .claude/
+├── npm / Python / Git / curl
+└── нет настоящего provider API key
+        │
+        ▼
+controller proxy
+        │ real API key is added here
+        ▼
+Anthropic-compatible provider
+```
+
+Controller **не монтирует проект**. Worker **не получает provider secret**.
+
+`/home/claude` — обычный Docker named volume. Поэтому установленные skills, plugins, npm CLI, настройки Claude и кэши переживают restart и rebuild контейнера.
 
 ## Возможности
 
 - streaming ответов Claude в Telegram;
-- компактные карточки tool use и tool result;
+- compact tool-use/tool-result cards;
 - интерактивные approvals;
-- поддержка `AskUserQuestion`;
-- сохранение и resume сессий через SQLite;
-- несколько проектов, провайдеров и моделей;
-- выбор permission mode и effort из Telegram;
-- очередь запросов;
-- просмотр workflow, tools, skills, MCP и истории;
-- token-efficient поиск через `rg`, `ast-grep`, Semble, Repomix и Universal Ctags;
-- опциональные Serena MCP и Context7;
-- Docker Compose и обычный Node.js запуск.
-
-Claude Code отдельно устанавливать не требуется: нужный runtime поставляется вместе с Claude Agent SDK.
+- полный `AskUserQuestion` flow;
+- persistent/resumable Claude sessions;
+- отдельный Docker worker для проекта;
+- persistent `/home/claude` для skills и пользовательских CLI;
+- provider proxy, скрывающий настоящий API key от worker;
+- проекты, провайдеры и модели;
+- `/effort` на уровне сессии;
+- workflow, history, tools, skills и MCP status;
+- `rg`, `ast-grep`, Semble, Repomix, Universal Ctags и `jq`;
+- опциональные Serena и Context7;
+- Docker Compose deployment.
 
 ## Требования
 
-- Telegram bot token от BotFather;
+- Docker + Docker Compose;
+- Telegram bot token;
 - числовой Telegram user ID;
-- API-ключ Anthropic-compatible провайдера;
-- endpoint с Messages API, streaming и tool use;
-- Docker Compose либо Node.js 22.13+;
+- Anthropic-compatible provider с Messages API, streaming и tool use;
 - каталог проекта на сервере.
 
-## Быстрый запуск через Docker Compose
+Claude Code отдельно на хост устанавливать не нужно.
+
+## Быстрый запуск
 
 ```bash
 git clone https://github.com/sorinqu-org/claudetg.git
@@ -43,12 +77,20 @@ mkdir -p data
 
 ### 1. `.env`
 
-Минимальный пример:
+Пример:
 
 ```dotenv
 TELEGRAM_BOT_TOKEN=123456789:telegram-bot-token
 TELEGRAM_ALLOWED_USER_IDS=123456789
+
 CUSTOM_PROVIDER_API_KEY=provider-api-key
+
+# Отдельный случайный секрет только для связи controller <-> worker.
+# Он не передаётся процессу Claude Code.
+CLAUDETG_INTERNAL_TOKEN=replace-with-random-value
+
+# На host. Только этот каталог будет mounted в worker-main.
+CLAUDETG_PROJECT_PATH=/srv/projects/main
 
 CONFIG_PATH=/app/config/config.json
 DATA_DIR=/app/data
@@ -65,16 +107,19 @@ MCP_TIMEOUT=60000
 CLAUDE_CODE_EFFORT_LEVEL=medium
 CLAUDE_CODE_ENABLE_PROMPT_SUGGESTION=false
 CLAUDE_CODE_DISABLE_THINKING=false
-
-# Только если используете Context7 и хотите передавать ключ агенту.
-CONTEXT7_API_KEY=
 ```
 
-`TELEGRAM_ALLOWED_USER_IDS` содержит числовые ID, а не usernames. Несколько ID указываются через запятую.
+Для internal token удобно использовать:
 
-Не коммитьте настоящий `.env`.
+```bash
+openssl rand -hex 32
+```
 
-### 2. Провайдер и проект
+`TELEGRAM_ALLOWED_USER_IDS` содержит числовые Telegram ID, а не usernames.
+
+Настоящий `.env` не коммитьте.
+
+### 2. Provider и worker
 
 `config/config.json`:
 
@@ -102,7 +147,8 @@ CONTEXT7_API_KEY=
     {
       "id": "main",
       "name": "Main project",
-      "path": "/workspace/main",
+      "path": "/workspace",
+      "workerUrl": "http://worker-main:3100",
       "providerId": "custom",
       "modelId": "claude-opus-4-8",
       "permissionMode": "default",
@@ -112,10 +158,10 @@ CONTEXT7_API_KEY=
         "Bash(* /var/run/docker.sock*)"
       ],
       "additionalDirectories": [],
-      "settingSources": ["project", "local"],
+      "settingSources": ["user", "project", "local"],
       "passEnv": [],
       "autoAllowReadTools": true,
-      "systemPromptAppend": "Work only inside configured project directories. Ask before destructive or externally visible actions."
+      "systemPromptAppend": "You are running inside an isolated per-project Docker worker. /workspace is the project and /home/claude is your persistent private home."
     }
   ],
   "agent": {
@@ -131,7 +177,11 @@ CONTEXT7_API_KEY=
 }
 ```
 
-### Важно: `auth.env` — это имя переменной, а не API-ключ
+`projects[].path` — путь **внутри worker**, а не путь на host. В стандартном Compose это `/workspace`.
+
+`projects[].workerUrl` — внутренний адрес worker в Docker network.
+
+### 3. Важно: `auth.env` — имя переменной
 
 Правильно:
 
@@ -145,33 +195,24 @@ CONTEXT7_API_KEY=
 и в `.env`:
 
 ```dotenv
-CUSTOM_PROVIDER_API_KEY=sk-your-real-key
+CUSTOM_PROVIDER_API_KEY=real-secret
 ```
 
 Неправильно:
 
 ```json
-"auth": {
-  "type": "bearer",
-  "env": "sk-your-real-key"
-}
+"env": "sk-real-secret"
 ```
 
-Поле `env` говорит ClaudeTG, из какой переменной окружения взять секрет. Сам ключ в `config.json` хранить не нужно.
-
-Для Bearer authentication используется `auth.type = "bearer"`. Если провайдер ожидает `X-Api-Key`, используйте `auth.type = "api-key"`.
+Provider secret читается controller-контейнером. Worker его не получает.
 
 ### AgentRouter
 
-Для AgentRouter конфигурация выглядит так:
-
-`.env`:
+Для AgentRouter:
 
 ```dotenv
-AGENTROUTER_API_KEY=your-agentrouter-key
+AGENTROUTER_API_KEY=your-key
 ```
-
-`config/config.json`:
 
 ```json
 {
@@ -191,44 +232,217 @@ AGENTROUTER_API_KEY=your-agentrouter-key
 }
 ```
 
-Для Anthropic/Claude Code совместимого маршрута используется `https://co.agentrouter.org`, без `/v1`.
+Для Anthropic-compatible Claude Code route используется `https://co.agentrouter.org`, без `/v1` в `baseUrl`.
 
-### 3. Каталог проекта
-
-По умолчанию `docker-compose.yml` монтирует:
-
-```yaml
-- /srv/projects:/workspace:rw
-```
-
-Значит `/srv/projects/main` на хосте соответствует `/workspace/main` внутри контейнера.
+### 4. Подготовьте проект
 
 ```bash
 sudo mkdir -p /srv/projects/main
-sudo chown -R 10001:10001 /srv/projects/main data
+sudo chown -R 10001:10001 /srv/projects/main
 ```
 
-Если меняете mount, обновите и `projects[].path`.
+Или поменяйте:
 
-### 4. Запуск
+```dotenv
+CLAUDETG_PROJECT_PATH=/другой/путь
+```
+
+Controller этот каталог не видит. Он смонтирован только в `worker-main`.
+
+### 5. Запуск
 
 ```bash
-docker compose up -d --build
+docker compose build --no-cache
+docker compose up -d
 ```
 
-Логи:
+Статус:
+
+```bash
+docker compose ps
+```
+
+Логи controller:
 
 ```bash
 docker compose logs -f claudetg
 ```
 
-Healthcheck:
+Логи Claude worker:
 
 ```bash
-curl http://127.0.0.1:3000/healthz
+docker compose logs -f worker-main
 ```
 
 После запуска отправьте боту `/start`.
+
+## Что находится в worker
+
+Worker выглядит для Claude как отдельная маленькая Linux-система:
+
+```text
+/
+├── app/                 runtime ClaudeTG
+├── workspace/           project mount
+├── home/claude/         persistent named volume
+│   ├── .claude/
+│   ├── .config/
+│   ├── .cache/
+│   ├── .local/
+│   └── .npm/
+└── tmp/                 temporary filesystem
+```
+
+Claude запускается как non-root user `claude`.
+
+У worker нет:
+
+- host `/home`;
+- host `/etc`;
+- Docker socket;
+- соседних проектов, если вы их отдельно не mounted;
+- настоящего API key провайдера.
+
+## Persistent Claude HOME
+
+В Compose:
+
+```yaml
+volumes:
+  - claude_home_main:/home/claude
+```
+
+Поэтому, например:
+
+```text
+/home/claude/.claude/skills
+/home/claude/.claude/plugins
+/home/claude/.local/bin
+```
+
+не исчезают после:
+
+```bash
+docker compose restart worker-main
+```
+
+или rebuild image.
+
+Проверить:
+
+```bash
+docker compose exec worker-main bash
+
+echo "$HOME"
+ls -la ~/.claude
+```
+
+Ожидаемый HOME:
+
+```text
+/home/claude
+```
+
+### Установка skills и CLI
+
+Можно дать Claude задачу установить skill самостоятельно либо открыть shell worker:
+
+```bash
+docker compose exec worker-main bash
+```
+
+Например:
+
+```bash
+npx skills add https://github.com/tavily-ai/skills
+```
+
+User-level npm packages устанавливаются в `/home/claude/.local`, потому что `NPM_CONFIG_PREFIX` уже настроен.
+
+Python virtualenvs, конфиги и user-level tools тоже можно хранить в `/home/claude`.
+
+> Не используйте `docker compose down -v`, если хотите сохранить worker HOME. Ключ `-v` удалит named volume вместе со skills и пользовательскими настройками.
+
+Для намеренного полного сброса worker HOME:
+
+```bash
+docker compose down -v
+```
+
+## Provider proxy и секреты
+
+Worker получает:
+
+```text
+ANTHROPIC_BASE_URL=http://claudetg:3000/provider-proxy/<provider>
+```
+
+и технический фиктивный credential. Настоящий provider key находится только в controller.
+
+Когда Claude Agent SDK делает запрос:
+
+```text
+worker -> controller proxy -> provider
+```
+
+controller удаляет worker auth header и добавляет реальный Bearer/API key непосредственно перед запросом к provider.
+
+Proxy пропускает только необходимые Anthropic endpoints:
+
+```text
+/v1/messages
+/v1/messages/count_tokens
+/v1/models
+```
+
+Это скрывает значение API key от Claude и от Bash subprocesses в worker.
+
+Важно: worker всё равно может пользоваться provider через proxy, иначе Claude не смог бы работать. То есть изоляция защищает **значение секрета**, но не является отдельной системой квотирования provider usage.
+
+## Проектные `.env`
+
+Docker изоляция не делает файлы внутри `/workspace` невидимыми для Claude.
+
+Если на host:
+
+```text
+/srv/projects/main/.env
+```
+
+то worker получает:
+
+```text
+/workspace/.env
+```
+
+потому что это часть самого проекта.
+
+Это **не sandbox escape**.
+
+Если project `.env` содержит секреты, которые Claude не должен видеть, лучше не хранить их в mounted workspace: используйте host secret store, отдельный runtime deployment env или другой каталог, который не mounted в worker.
+
+Provider key ClaudeTG уже вынесен из workspace полностью и worker его не получает.
+
+## Почему больше нет nested bubblewrap
+
+Раньше ClaudeTG запускал Claude Code в том же контейнере и пытался дополнительно использовать bubblewrap sandbox. На некоторых Docker hosts это ломалось на user namespaces:
+
+```text
+bwrap: No permissions to create new namespace
+```
+
+Теперь isolation boundary — сам `worker-main` контейнер:
+
+- отдельная filesystem namespace;
+- narrow project mount;
+- non-root user;
+- `cap_drop: ALL`;
+- `no-new-privileges`;
+- read-only root filesystem;
+- отдельный HOME volume;
+- provider key отсутствует.
+
+Поэтому nested bubblewrap не требуется для защиты provider credential.
 
 ## Telegram-команды
 
@@ -236,15 +450,15 @@ curl http://127.0.0.1:3000/healthz
 | --- | --- |
 | `/new [название]` | новая сессия |
 | `/sessions` | список и переключение сессий |
-| `/project` | выбрать проект |
+| `/project` | выбрать проект/worker |
 | `/provider` | выбрать provider |
 | `/model` | выбрать модель |
 | `/mode` | permission mode |
-| `/effort` | effort для текущей сессии |
-| `/status` | состояние, очередь, cost, SDK session ID и effort |
-| `/workflow` | workflow/task состояние |
-| `/tools` | tools, MCP, skills и permissions |
-| `/settings` | конфигурация приложения и проекта |
+| `/effort` | effort текущей сессии |
+| `/status` | worker, session, model, cost и queue |
+| `/workflow` | workflow/task state |
+| `/tools` | tools, skills, MCP и permissions |
+| `/settings` | controller + worker settings |
 | `/history [N]` | последние события |
 | `/stop` | остановить turn и очистить очередь |
 | `/cancel` | отменить ожидающий approval/question |
@@ -252,11 +466,11 @@ curl http://127.0.0.1:3000/healthz
 | `/rename название` | переименовать сессию |
 | `/close` | архивировать сессию |
 
-Обычный текст запускает новый turn. Если Claude уже работает, сообщение попадает в очередь.
+Обычный текст запускает turn. Если turn уже выполняется, сообщение попадает в очередь.
 
-## Effort и output tokens
+## Effort и стоимость
 
-`/effort` меняет уровень только для активной Telegram-сессии. Выбор сохраняется в SQLite и применяется со следующего turn.
+`/effort` сохраняется отдельно для каждой Claude-сессии.
 
 Доступны:
 
@@ -267,160 +481,172 @@ curl http://127.0.0.1:3000/healthz
 - `xhigh`;
 - `max`.
 
-Значение по умолчанию:
+По умолчанию:
 
 ```dotenv
 CLAUDE_CODE_EFFORT_LEVEL=medium
 ```
 
-`medium` подходит для обычной разработки. `low` дешевле на простых задачах, но может увеличить число повторных попыток. `high` и выше имеет смысл использовать для сложной отладки и архитектурных изменений.
+`low` подходит для простых дешёвых задач; `high` и выше — для сложной отладки и архитектурных изменений.
 
-Prompt suggestions и progress summaries отключены, потому что Telegram-интерфейс уже показывает ход работы. Встроенный skill также просит Claude не генерировать лишние преамбулы, полный diff и длинные логи.
+## Token-efficient tools
 
-Агрессивный вариант:
+Worker image содержит:
 
-```dotenv
-CLAUDE_CODE_DISABLE_THINKING=true
-```
+- `rg`;
+- `ast-grep` (`sg`);
+- Semble;
+- Repomix;
+- Universal Ctags;
+- `jq`;
+- Serena (опционально);
+- Context7 (опционально).
 
-Он может сократить output tokens, но способен ухудшить сложные многошаговые задачи.
-
-## Инструменты экономии контекста
-
-### `rg`
-
-Быстрый точный поиск строк, имён и конфигурационных ключей.
-
-### `ast-grep` (`sg`)
-
-Структурный поиск по AST: вызовы функций, импорты, объявления, JSX и синтаксически точные замены.
-
-### Semble
-
-Включён по умолчанию:
+Настройки:
 
 ```dotenv
+TOKEN_EFFICIENCY_ENABLED=true
 SEMBLE_ENABLED=true
-```
-
-Используется для semantic code search, когда точное имя символа неизвестно. Работает локально. На первом запуске может потребоваться инициализация локальной модели/индекса.
-
-### Universal Ctags + `jq`
-
-Ctags создаёт дешёвый индекс символов, `jq` позволяет получать из больших JSON только нужные поля вместо передачи всего файла в контекст.
-
-### Repomix
-
-Используется только для ограниченной карты репозитория. Агент должен сначала смотреть token tree, затем выбирать узкий `--include` и при необходимости `--compress`. Полный repository pack автоматически не отправляется модели.
-
-### Serena
-
-По умолчанию выключена:
-
-```dotenv
 SERENA_ENABLED=false
-```
-
-Для средних и больших проектов можно включить symbol-level navigation и references:
-
-```dotenv
-SERENA_ENABLED=true
-```
-
-### Context7
-
-По умолчанию выключен, потому что использует внешний сервис:
-
-```dotenv
 CONTEXT7_ENABLED=false
 ```
 
-Он полезен для точечных запросов к актуальной публичной документации библиотек. Не отправляйте через него приватный исходный код.
+## Несколько проектов
 
-Подробнее: `docs/token-efficiency.md` и `docs/search-tools.md`.
+Для настоящей filesystem isolation лучше использовать **отдельный worker на каждый проект**, а не монтировать несколько репозиториев в один контейнер.
 
-## Permissions
+Например:
 
-Если действие не разрешено заранее, Telegram показывает approval-кнопки. Можно разрешить один раз, разрешить инструмент до конца сессии, отклонить либо отклонить и остановить turn.
+```yaml
+worker-api:
+  # ... worker target
+  environment:
+    WORKER_PROJECT_ID: api
+  volumes:
+    - /srv/projects/api:/workspace:rw
+    - claude_home_api:/home/claude
 
-`allowedTools` — предварительные правила разрешения. `disallowedTools` блокирует совпавшие действия. `bypassPermissions` из Telegram недоступен.
-
-Permission modes:
-
-- `default`;
-- `acceptEdits`;
-- `plan`;
-- `dontAsk`;
-- `auto`.
-
-## Сессии и данные
-
-Сессии, workflow, история и временные approvals хранятся в SQLite в каталоге `data`. API-ключи в SQLite не записываются.
-
-После перезапуска ClaudeTG может продолжить сохранённую SDK session по её ID.
-
-Предупреждение Node.js про experimental SQLite само по себе не означает ошибку приложения.
-
-## Если бот отвечает на `/new`, но молчит на обычное сообщение
-
-Сначала смотрите:
-
-```bash
-docker compose logs -f claudetg
+worker-web:
+  # ... worker target
+  environment:
+    WORKER_PROJECT_ID: web
+  volumes:
+    - /srv/projects/web:/workspace:rw
+    - claude_home_web:/home/claude
 ```
 
-Частая ошибка конфигурации:
+А в config:
+
+```json
+{
+  "id": "api",
+  "path": "/workspace",
+  "workerUrl": "http://worker-api:3100"
+}
+```
+
+и:
+
+```json
+{
+  "id": "web",
+  "path": "/workspace",
+  "workerUrl": "http://worker-web:3100"
+}
+```
+
+Так project A физически отсутствует в filesystem worker B.
+
+## Миграция со старой схемы
+
+В старой версии controller сам имел mount `/srv/projects:/workspace` и запускал Claude Code внутри себя.
+
+После обновления:
+
+1. добавьте `CLAUDETG_INTERNAL_TOKEN` в `.env`;
+2. добавьте `CLAUDETG_PROJECT_PATH`;
+3. поменяйте project path в config на `/workspace`;
+4. добавьте `workerUrl: "http://worker-main:3100"`;
+5. пересоберите оба image targets;
+6. убедитесь, что `worker-main` healthy.
+
+Команды:
+
+```bash
+git pull
+cp .env.example .env.example.new   # только если хотите сравнить новые поля
+
+docker compose down
+docker compose build --no-cache
+docker compose up -d
+
+docker compose ps
+```
+
+Не добавляйте `-v` к `down`, если уже используете persistent Claude HOME.
+
+## Диагностика
+
+### Worker недоступен
+
+```bash
+docker compose ps
+docker compose logs worker-main
+curl http://127.0.0.1:3000/healthz
+```
+
+Worker health из Docker network:
+
+```bash
+docker compose exec claudetg node -e \
+  "fetch('http://worker-main:3100/healthz').then(r=>r.text()).then(console.log)"
+```
+
+### Проверка, что provider key не попал в worker
+
+Для AgentRouter:
+
+```bash
+docker compose exec worker-main sh -lc \
+  'test -z "$AGENTROUTER_API_KEY" && echo hidden || echo LEAKED'
+```
+
+Должно быть:
 
 ```text
-Provider credential environment variable is missing: ...
+hidden
 ```
 
-Проверьте две вещи:
-
-1. `providers[].auth.env` содержит **имя** переменной, например `AGENTROUTER_API_KEY`;
-2. в `.env` действительно есть `AGENTROUTER_API_KEY=...`.
-
-После изменения `.env` или `config/config.json` пересоздайте контейнер:
+В controller ключ, наоборот, должен существовать:
 
 ```bash
-docker compose up -d --build --force-recreate
+docker compose exec claudetg sh -lc \
+  'test -n "$AGENTROUTER_API_KEY" && echo configured || echo missing'
 ```
 
-Проверить, что переменная попала в контейнер, можно без вывода самого секрета:
+### Проверка persistent HOME
 
 ```bash
-docker compose exec claudetg sh -lc 'test -n "$AGENTROUTER_API_KEY" && echo configured || echo missing'
+docker compose exec worker-main sh -lc \
+  'echo "$HOME"; mkdir -p ~/.claude/skills/test-persist; echo ok > ~/.claude/skills/test-persist/check'
+
+docker compose restart worker-main
+
+docker compose exec worker-main cat /home/claude/.claude/skills/test-persist/check
 ```
 
-Новые версии ClaudeTG также отправляют startup/config errors прямо в Telegram, вместо того чтобы только писать их в Docker log.
+Должно вывести `ok`.
 
-## Безопасность
+## Security notes
 
-- ограничьте `TELEGRAM_ALLOWED_USER_IDS`;
-- не монтируйте `/var/run/docker.sock`;
-- не монтируйте корень хоста, домашний каталог и SSH-ключи;
-- запускайте сервис отдельным пользователем;
-- держите реальные API keys только в `.env`/secret store;
-- настройте `disallowedTools`, timeout, max turns и budget;
-- не публикуйте логи, в которых случайно оказался действующий ключ.
-
-Если ключ попал в публичный лог, issue, чат или скриншот, считайте его скомпрометированным и выпустите новый.
-
-Подробнее: [`SECURITY.md`](SECURITY.md).
-
-## Запуск без Docker
-
-```bash
-npm install
-npm run build
-
-cp .env.example .env
-cp config/config.example.json config/config.json
-
-node --env-file=.env dist/index.js
-```
-
-При нативном запуске пути из `config/config.json` должны существовать на хосте. Unit для systemd находится в `deploy/claudetg.service`.
+- никогда не монтируйте Docker socket в worker;
+- не монтируйте host `/`, `/home` или `/etc`;
+- один project — один worker предпочтительнее;
+- `CLAUDETG_INTERNAL_TOKEN` должен быть случайным;
+- worker имеет network access, потому что coding agent должен уметь устанавливать зависимости и skills;
+- network access означает, что tool approvals и политика команд всё ещё имеют значение;
+- persistent worker HOME может содержать токены сторонних CLI, если вы сами туда залогинились — относитесь к этому volume как к приватным данным;
+- controller provider key не хранится в SQLite и не передаётся worker.
 
 ## Разработка
 
@@ -430,18 +656,17 @@ npm run typecheck
 npm test
 ```
 
-GitHub Actions выполняет typecheck, unit tests и сборку Docker image.
+CI отдельно собирает:
+
+- controller image;
+- worker image;
+- TypeScript + unit tests.
 
 ## Ограничения
 
-ClaudeTG не конвертирует OpenAI API в Anthropic API. Provider должен сам поддерживать Anthropic Messages API, streaming и tool use.
+ClaudeTG не преобразует OpenAI API в Anthropic API. Provider должен поддерживать Anthropic Messages API, streaming и tool use.
 
-Автотесты не проверяют ваш конкретный provider endpoint без настоящего API key. После развёртывания рекомендуется вручную проверить:
-
-1. обычный текстовый ответ;
-2. чтение файла;
-3. Bash с approval;
-4. `AskUserQuestion`.
+Worker isolation — это Docker container isolation, а не полноценная аппаратная VM. Если нужен более сильный tenant boundary для недоверенных пользователей, используйте отдельные VM/microVM, а не общий Docker daemon.
 
 ## Лицензия
 

@@ -22,7 +22,8 @@
     {
       "id": "main",
       "name": "Main project",
-      "path": "/workspace/main",
+      "path": "/workspace",
+      "workerUrl": "http://worker-main:3100",
       "providerId": "custom",
       "modelId": "claude-opus-4-8",
       "permissionMode": "default",
@@ -32,10 +33,10 @@
         "Bash(* /var/run/docker.sock*)"
       ],
       "additionalDirectories": [],
-      "settingSources": ["project", "local"],
-      "passEnv": ["CI"],
+      "settingSources": ["user", "project", "local"],
+      "passEnv": [],
       "autoAllowReadTools": true,
-      "systemPromptAppend": "Work only inside the configured project directories. Never reveal secrets or credentials. Ask before destructive or externally visible actions."
+      "systemPromptAppend": "You are running inside an isolated per-project Docker worker. /workspace is the project and /home/claude is your persistent private home. You may install user-level skills and CLI tools under /home/claude. Never ask for or expose provider credentials; they are intentionally unavailable in this container."
     }
   ],
   "agent": {
