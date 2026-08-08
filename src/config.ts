@@ -87,6 +87,17 @@ function validateUrl(raw: string, label: string, allowHttp = false): string {
   return value;
 }
 
+export function normalizeWorkerProjectPath(rawPath: string, projectId: string): string {
+  const normalized = path.posix.normalize(rawPath);
+  if (!normalized.startsWith("/")) throw new Error("project path must be an absolute path inside the worker");
+
+  // Pre-worker deployments mounted /srv/projects at /workspace and therefore used
+  // /workspace/<projectId>. A per-project worker mounts that project itself at
+  // /workspace, so transparently migrate the old canonical path.
+  if (normalized === path.posix.join("/workspace", projectId)) return "/workspace";
+  return normalized;
+}
+
 function parseProvider(raw: unknown, index: number): ProviderConfig {
   const value = asObject(raw, `providers[${index}]`);
   const auth = asObject(value.auth, `providers[${index}].auth`);
@@ -127,8 +138,13 @@ function parseProvider(raw: unknown, index: number): ProviderConfig {
 
 function parseProject(raw: unknown, index: number): ProjectConfig {
   const value = asObject(raw, `projects[${index}]`);
-  const projectPath = path.posix.normalize(asString(value.path, `projects[${index}].path`));
-  if (!projectPath.startsWith("/")) throw new Error(`projects[${index}].path must be an absolute path inside the worker`);
+  const projectId = asString(value.id, `projects[${index}].id`);
+  let projectPath: string;
+  try {
+    projectPath = normalizeWorkerProjectPath(asString(value.path, `projects[${index}].path`), projectId);
+  } catch (error) {
+    throw new Error(`projects[${index}].path is invalid: ${error instanceof Error ? error.message : String(error)}`);
+  }
   const workerUrl = validateUrl(
     typeof value.workerUrl === "string" && value.workerUrl.trim() ? value.workerUrl.trim() : "http://worker-main:3100",
     `projects[${index}].workerUrl`,
@@ -149,7 +165,7 @@ function parseProject(raw: unknown, index: number): ProjectConfig {
     return source as SettingSource;
   });
   return {
-    id: asString(value.id, `projects[${index}].id`),
+    id: projectId,
     name: asString(value.name, `projects[${index}].name`),
     path: projectPath,
     workerUrl,
